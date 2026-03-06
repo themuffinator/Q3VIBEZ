@@ -193,9 +193,9 @@ if is_windows
     q3ui_defines += ['-DUSE_VULKAN_API']
   endif
 else
-  sdl2_dep = dependency('sdl2', fallback : ['sdl2', 'sdl2_dep'], required : true)
-  q3ui_build_deps += [sdl2_dep]
-  client_link_deps += [sdl2_dep]
+  sdl3_dep = dependency('sdl3', required : true, fallback : ['sdl3', 'sdl3_dep'])
+  q3ui_build_deps += [sdl3_dep]
+  client_link_deps += [sdl3_dep]
 
   m_dep = cc.find_library('m', required : false)
   if m_dep.found()

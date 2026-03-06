@@ -21,14 +21,14 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
 #ifdef USE_LOCAL_HEADERS
-#	include "SDL.h"
+#	include "SDL3/SDL.h"
 #ifdef USE_VULKAN_API
-#	include "SDL_vulkan.h"
+#	include "SDL3/SDL_vulkan.h"
 #endif
 #else
-#	include <SDL.h>
+#	include <SDL3/SDL.h>
 #ifdef USE_VULKAN_API
-#	include <SDL_vulkan.h>
+#	include <SDL3/SDL_vulkan.h>
 #endif
 #endif
 
@@ -56,6 +56,36 @@ static PFN_vkGetInstanceProcAddr qvkGetInstanceProcAddr;
 cvar_t *r_stereoEnabled;
 cvar_t *in_nograb;
 
+static void GLW_SetCursorVisible( qboolean visible )
+{
+	if ( visible )
+		SDL_ShowCursor();
+	else
+		SDL_HideCursor();
+}
+
+static SDL_Window *GLW_CreateWindow( const char *title, int x, int y, int w, int h, SDL_WindowFlags flags )
+{
+	SDL_PropertiesID props;
+	SDL_Window *window;
+
+	props = SDL_CreateProperties();
+	if ( !props )
+		return NULL;
+
+	SDL_SetStringProperty( props, SDL_PROP_WINDOW_CREATE_TITLE_STRING, title );
+	SDL_SetNumberProperty( props, SDL_PROP_WINDOW_CREATE_X_NUMBER, x );
+	SDL_SetNumberProperty( props, SDL_PROP_WINDOW_CREATE_Y_NUMBER, y );
+	SDL_SetNumberProperty( props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, w );
+	SDL_SetNumberProperty( props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, h );
+	SDL_SetNumberProperty( props, SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER, flags );
+
+	window = SDL_CreateWindowWithProperties( props );
+	SDL_DestroyProperties( props );
+
+	return window;
+}
+
 /*
 ===============
 GLimp_Shutdown
@@ -71,7 +101,7 @@ void GLimp_Shutdown( qboolean unloadDLL )
 		if ( drv && strcmp( drv, "x11" ) == 0 ) {
 			SDL_WarpMouseGlobal( glw_state.desktop_width / 2, glw_state.desktop_height / 2 );
 		} else {
-			SDL_ShowCursor( SDL_TRUE );
+			GLW_SetCursorVisible( qtrue );
 		}
 	}
 
@@ -108,18 +138,21 @@ void GLimp_LogComment( const char *comment )
 }
 
 
-static int FindNearestDisplay( int *x, int *y, int w, int h )
+static SDL_DisplayID FindNearestDisplay( int *x, int *y, int w, int h )
 {
 	const int cx = *x + w / 2;
 	const int cy = *y + h / 2;
 	int i, index, numDisplays;
+	SDL_DisplayID chosen;
+	SDL_DisplayID *displays;
 	SDL_Rect *list, *m;
 
 	index = -1; // selected display index
+	chosen = 0;
 
-	numDisplays = SDL_GetNumVideoDisplays();
-	if ( numDisplays <= 0 )
-		return -1;
+	displays = SDL_GetDisplays( &numDisplays );
+	if ( displays == NULL || numDisplays <= 0 )
+		return 0;
 
 	glw_state.monitorCount = numDisplays;
 
@@ -127,7 +160,14 @@ static int FindNearestDisplay( int *x, int *y, int w, int h )
 
 	for ( i = 0; i < numDisplays; i++ )
 	{
-		SDL_GetDisplayBounds( i, list + i );
+		if ( !SDL_GetDisplayBounds( displays[i], list + i ) )
+		{
+			Com_DPrintf( "SDL_GetDisplayBounds() failed: %s\n", SDL_GetError() );
+			list[i].x = 0;
+			list[i].y = 0;
+			list[i].w = 0;
+			list[i].h = 0;
+		}
 		//Com_Printf( "[%i]: x=%i, y=%i, w=%i, h=%i\n", i, list[i].x, list[i].y, list[i].w, list[i].h );
 	}
 
@@ -166,6 +206,7 @@ static int FindNearestDisplay( int *x, int *y, int w, int h )
 	if ( index >= 0 )
 	{
 		m = list + index;
+		chosen = displays[index];
 		if ( *x < m->x )
 			*x = m->x;
 
@@ -174,8 +215,9 @@ static int FindNearestDisplay( int *x, int *y, int w, int h )
 	}
 
 	Z_Free( list );
+	SDL_free( displays );
 
-	return index;
+	return chosen;
 }
 
 
@@ -199,11 +241,11 @@ static int GLW_SetMode( int mode, const char *modeFS, qboolean fullscreen, qbool
 	int perChannelColorBits;
 	int colorBits, depthBits, stencilBits;
 	int i;
-	SDL_DisplayMode desktopMode;
-	int display;
+	const SDL_DisplayMode *desktopMode;
+	SDL_DisplayID display;
 	int x;
 	int y;
-	Uint32 flags = SDL_WINDOW_SHOWN;
+	SDL_WindowFlags flags = 0;
 
 #ifdef USE_VULKAN_API
 	if ( vulkan ) {
@@ -219,10 +261,10 @@ static int GLW_SetMode( int mode, const char *modeFS, qboolean fullscreen, qbool
 	// If a window exists, note its display index
 	if ( SDL_window != NULL )
 	{
-		display = SDL_GetWindowDisplayIndex( SDL_window );
-		if ( display < 0 )
+		display = SDL_GetDisplayForWindow( SDL_window );
+		if ( display == 0 )
 		{
-			Com_DPrintf( "SDL_GetWindowDisplayIndex() failed: %s\n", SDL_GetError() );
+			Com_DPrintf( "SDL_GetDisplayForWindow() failed: %s\n", SDL_GetError() );
 		}
 	}
 	else
@@ -237,10 +279,11 @@ static int GLW_SetMode( int mode, const char *modeFS, qboolean fullscreen, qbool
 		//Com_Printf("Selected display: %i\n", display );
 	}
 
-	if ( display >= 0 && SDL_GetDesktopDisplayMode( display, &desktopMode ) == 0 )
+	desktopMode = display ? SDL_GetDesktopDisplayMode( display ) : NULL;
+	if ( desktopMode != NULL )
 	{
-		glw_state.desktop_width = desktopMode.w;
-		glw_state.desktop_height = desktopMode.h;
+		glw_state.desktop_width = desktopMode->w;
+		glw_state.desktop_height = desktopMode->h;
 	}
 	else
 	{
@@ -264,7 +307,7 @@ static int GLW_SetMode( int mode, const char *modeFS, qboolean fullscreen, qbool
 	// Destroy existing state if it exists
 	if ( SDL_glContext != NULL )
 	{
-		SDL_GL_DeleteContext( SDL_glContext );
+		SDL_GL_DestroyContext( SDL_glContext );
 		SDL_glContext = NULL;
 	}
 
@@ -279,15 +322,7 @@ static int GLW_SetMode( int mode, const char *modeFS, qboolean fullscreen, qbool
 	gw_active = qfalse;
 	gw_minimized = qtrue;
 
-	if ( fullscreen )
-	{
-#ifdef MACOS_X
-		flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
-#else
-		flags |= SDL_WINDOW_FULLSCREEN;
-#endif
-	}
-	else if ( r_noborder->integer )
+	if ( !fullscreen && r_noborder->integer )
 	{
 		flags |= SDL_WINDOW_BORDERLESS;
 	}
@@ -413,16 +448,19 @@ static int GLW_SetMode( int mode, const char *modeFS, qboolean fullscreen, qbool
 				SDL_GL_SetAttribute( SDL_GL_ACCELERATED_VISUAL, 1 );
 		}
 
-		if ( ( SDL_window = SDL_CreateWindow( cl_title, x, y, config->vidWidth, config->vidHeight, flags ) ) == NULL )
+		if ( ( SDL_window = GLW_CreateWindow( cl_title, x, y, config->vidWidth, config->vidHeight, flags ) ) == NULL )
 		{
-			Com_DPrintf( "SDL_CreateWindow failed: %s\n", SDL_GetError() );
+			Com_DPrintf( "GLW_CreateWindow failed: %s\n", SDL_GetError() );
 			continue;
 		}
 
 		if ( fullscreen )
 		{
 			SDL_DisplayMode mode;
+			const SDL_DisplayMode *appliedMode = NULL;
 
+			SDL_zero( mode );
+			mode.displayID = display;
 			switch ( testColorBits )
 			{
 				case 16: mode.format = SDL_PIXELFORMAT_RGB565; break;
@@ -432,20 +470,50 @@ static int GLW_SetMode( int mode, const char *modeFS, qboolean fullscreen, qbool
 
 			mode.w = config->vidWidth;
 			mode.h = config->vidHeight;
-			mode.refresh_rate = /* config->displayFrequency = */ Cvar_VariableIntegerValue( "r_displayRefresh" );
-			mode.driverdata = NULL;
+			mode.pixel_density = 1.0f;
+			mode.refresh_rate = (float)Cvar_VariableIntegerValue( "r_displayRefresh" );
+			mode.refresh_rate_numerator = 0;
+			mode.refresh_rate_denominator = 0;
+			mode.internal = NULL;
 
-			if ( SDL_SetWindowDisplayMode( SDL_window, &mode ) < 0 )
+#ifdef MACOS_X
+			if ( !SDL_SetWindowFullscreenMode( SDL_window, NULL ) )
 			{
-				Com_DPrintf( "SDL_SetWindowDisplayMode failed: %s\n", SDL_GetError( ) );
+				Com_DPrintf( "SDL_SetWindowFullscreenMode failed: %s\n", SDL_GetError( ) );
+				SDL_DestroyWindow( SDL_window );
+				SDL_window = NULL;
+				continue;
+			}
+#else
+			if ( !SDL_SetWindowFullscreenMode( SDL_window, &mode ) )
+			{
+				Com_DPrintf( "SDL_SetWindowFullscreenMode failed: %s\n", SDL_GetError( ) );
+				SDL_DestroyWindow( SDL_window );
+				SDL_window = NULL;
+				continue;
+			}
+#endif
+
+			if ( !SDL_SetWindowFullscreen( SDL_window, true ) )
+			{
+				Com_DPrintf( "SDL_SetWindowFullscreen failed: %s\n", SDL_GetError( ) );
+				SDL_DestroyWindow( SDL_window );
+				SDL_window = NULL;
 				continue;
 			}
 
-			if ( SDL_GetWindowDisplayMode( SDL_window, &mode ) >= 0 )
+			appliedMode = SDL_GetWindowFullscreenMode( SDL_window );
+			if ( appliedMode != NULL )
 			{
-				config->displayFrequency = mode.refresh_rate;
-				config->vidWidth = mode.w;
-				config->vidHeight = mode.h;
+				config->displayFrequency = (int)appliedMode->refresh_rate;
+				config->vidWidth = appliedMode->w;
+				config->vidHeight = appliedMode->h;
+			}
+			else if ( desktopMode != NULL )
+			{
+				config->displayFrequency = (int)desktopMode->refresh_rate;
+				config->vidWidth = desktopMode->w;
+				config->vidHeight = desktopMode->h;
 			}
 		}
 
@@ -470,7 +538,7 @@ static int GLW_SetMode( int mode, const char *modeFS, qboolean fullscreen, qbool
 				}
 			}
 
-			if ( SDL_GL_SetSwapInterval( r_swapInterval->integer ) == -1 )
+			if ( !SDL_GL_SetSwapInterval( r_swapInterval->integer ) )
 			{
 				Com_DPrintf( "SDL_GL_SetSwapInterval failed: %s\n", SDL_GetError( ) );
 			}
@@ -493,22 +561,24 @@ static int GLW_SetMode( int mode, const char *modeFS, qboolean fullscreen, qbool
 	if ( SDL_window )
 	{
 #ifdef USE_ICON
-		SDL_Surface *icon = SDL_CreateRGBSurfaceFrom(
-			(void *)CLIENT_WINDOW_ICON.pixel_data,
+		SDL_Surface *icon = SDL_CreateSurfaceFrom(
 			CLIENT_WINDOW_ICON.width,
 			CLIENT_WINDOW_ICON.height,
-			CLIENT_WINDOW_ICON.bytes_per_pixel * 8,
-			CLIENT_WINDOW_ICON.bytes_per_pixel * CLIENT_WINDOW_ICON.width,
+			SDL_GetPixelFormatForMasks(
+				CLIENT_WINDOW_ICON.bytes_per_pixel * 8,
 #ifdef Q3_LITTLE_ENDIAN
-			0x000000FF, 0x0000FF00, 0x00FF0000, 0xFF000000
+				0x000000FF, 0x0000FF00, 0x00FF0000, 0xFF000000
 #else
-			0xFF000000, 0x00FF0000, 0x0000FF00, 0x000000FF
+				0xFF000000, 0x00FF0000, 0x0000FF00, 0x000000FF
 #endif
+			),
+			(void *)CLIENT_WINDOW_ICON.pixel_data,
+			CLIENT_WINDOW_ICON.bytes_per_pixel * CLIENT_WINDOW_ICON.width
 		);
 		if ( icon )
 		{
 			SDL_SetWindowIcon( SDL_window, icon );
-			SDL_FreeSurface( icon );
+			SDL_DestroySurface( icon );
 		}
 #endif
 	}
@@ -521,12 +591,10 @@ static int GLW_SetMode( int mode, const char *modeFS, qboolean fullscreen, qbool
 	if ( !fullscreen && r_noborder->integer )
 		SDL_SetWindowHitTest( SDL_window, SDL_HitTestFunc, NULL );
 
-#ifdef USE_VULKAN_API
-	if ( vulkan )
-		SDL_Vulkan_GetDrawableSize( SDL_window, &config->vidWidth, &config->vidHeight );
-	else
-#endif
-		SDL_GL_GetDrawableSize( SDL_window, &config->vidWidth, &config->vidHeight );
+	if ( !SDL_GetWindowSizeInPixels( SDL_window, &config->vidWidth, &config->vidHeight ) )
+	{
+		Com_DPrintf( "SDL_GetWindowSizeInPixels failed: %s\n", SDL_GetError() );
+	}
 
 	// save render dimensions as renderer may change it in advance
 	glw_state.window_width = config->vidWidth;
@@ -559,9 +627,9 @@ static rserr_t GLimp_StartDriverAndSetMode( int mode, const char *modeFS, qboole
 	{
 		const char *driverName;
 
-		if ( SDL_Init( SDL_INIT_VIDEO ) != 0 )
+		if ( !SDL_InitSubSystem( SDL_INIT_VIDEO ) )
 		{
-			Com_Printf( "SDL_Init( SDL_INIT_VIDEO ) FAILED (%s)\n", SDL_GetError() );
+			Com_Printf( "SDL_InitSubSystem( SDL_INIT_VIDEO ) FAILED (%s)\n", SDL_GetError() );
 			return RSERR_FATAL_ERROR;
 		}
 
@@ -732,7 +800,7 @@ void VKimp_Init( glconfig_t *config )
 		}
 	}
 
-	qvkGetInstanceProcAddr = SDL_Vulkan_GetVkGetInstanceProcAddr();
+	qvkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)SDL_Vulkan_GetVkGetInstanceProcAddr();
 
 	if ( qvkGetInstanceProcAddr == NULL )
 	{
@@ -771,7 +839,7 @@ VK_CreateSurface
 */
 qboolean VK_CreateSurface( VkInstance instance, VkSurfaceKHR *surface )
 {
-	if ( SDL_Vulkan_CreateSurface( SDL_window, instance, surface ) == SDL_TRUE )
+	if ( SDL_Vulkan_CreateSurface( SDL_window, instance, NULL, surface ) )
 		return qtrue;
 	else
 		return qfalse;
@@ -793,7 +861,7 @@ void VKimp_Shutdown( qboolean unloadDLL )
 		if ( drv && strcmp( drv, "x11" ) == 0 ) {
 			SDL_WarpMouseGlobal( glw_state.desktop_width / 2, glw_state.desktop_height / 2 );
 		} else {
-			SDL_ShowCursor( SDL_TRUE );
+			GLW_SetCursorVisible( qtrue );
 		}
 	}
 

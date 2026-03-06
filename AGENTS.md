@@ -65,7 +65,8 @@
 - External dependencies are resolved from the top-level build through `dependency(..., fallback: ...)`.
 - Vendored wrappers live under `subprojects/` and mirror the WORR-style dependency contract instead of hard-coding `code/lib*` paths in the root `meson.build`.
 - On Windows, `libjpeg`, `libogg`, `libvorbis`, and `libcurl` use vendored Meson wrappers.
-- On Linux and macOS, SDL2 and libcurl are expected to resolve from the host environment first, with vendored wrappers remaining available where configured.
+- On Linux and macOS, SDL3 and libcurl resolve from the host environment first when available, with vendored wrappers remaining available where configured.
+- The active SDL wrapper is `subprojects/sdl3/`, and its vendored upstream tree lives in `subprojects/sdl3-upstream/`.
 
 ## Licensing
 

@@ -2,6 +2,11 @@
 
 Q3VIBE Engine is an ultra-developed Quake 3 engine fork built on top of Quake3e. The repository now uses a Meson/Ninja build as the active build system, with the imported upstream documentation and legacy build entry points preserved under `archive/`.
 
+## Project Features So Far
+
+- Modern build tools
+- SDL3
+
 ## Project Goals
 
 - Use Quake3e as a practical upstream base for ongoing engine work.
@@ -16,7 +21,7 @@ Q3VIBE Engine is an ultra-developed Quake 3 engine fork built on top of Quake3e.
 Verified locally today:
 
 - Windows x86_64 with `clang-cl`, `lld-link`, Meson, and Ninja.
-- Linux x86_64 with GCC, Meson, and Ninja through the SDL platform layer.
+- Linux x86_64 with GCC, Meson, and Ninja through the SDL3 platform layer.
 
 Supported build contract:
 
@@ -49,7 +54,7 @@ Outputs:
 
 ### Linux x86_64
 
-Prerequisites: `libsdl2-dev`, `libcurl4-openssl-dev`, OpenGL/Vulkan runtime support, Meson, Ninja, and Python 3.
+Prerequisites: `libsdl3-dev` or the vendored SDL3 wrapper toolchain dependencies, `libcurl4-openssl-dev`, OpenGL/Vulkan runtime support, Meson, Ninja, and Python 3.
 
 Debug:
 
@@ -74,7 +79,7 @@ Outputs:
 
 ### macOS
 
-Prerequisites: Xcode Command Line Tools, Homebrew `sdl2`, Homebrew `curl`, Meson, Ninja, and Python 3.
+Prerequisites: Xcode Command Line Tools, Homebrew `sdl3`, Homebrew `curl`, Meson, Ninja, and Python 3.
 
 Debug:
 
@@ -99,7 +104,9 @@ Expected outputs:
 
 - `code/`: engine, renderer, platform, and game-facing source imported from Quake3e.
 - `meson.build`, `meson.options`: active top-level build definition.
-- `subprojects/`: Meson dependency wrappers and vendored external dependency trees for `libjpeg`, `libogg`, `libvorbis`, `libcurl`, and `SDL2`, following the same fallback-driven layout used in `../WORR/`.
+- `subprojects/`: Meson dependency wrappers and vendored external dependency trees for `libjpeg`, `libogg`, `libvorbis`, `libcurl`, and SDL3, following the same fallback-driven layout used in `../WORR/`.
+- `subprojects/sdl3/`: the active SDL3 Meson wrapper.
+- `subprojects/sdl3-upstream/`: the vendored SDL 3.4.2 source tree consumed by the SDL3 wrapper.
 - `toolchains/`: checked-in Meson native files.
 - `build-support/meson/sources/meson.build`: generated source manifest used by Meson for engine sources only.
 - `scripts/`: Meson maintenance helpers, including source-list and GLSL string generation.

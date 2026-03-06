@@ -122,7 +122,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "glext.h"
 
 // GL function loader, based on https://gist.github.com/rygorous/16796a0c876cf8a5f542caddb55bce8a
-// get missing functions from code/SDL2/include/SDL_opengl.h
+// get missing functions from SDL's OpenGL headers when platform headers omit them
 
 // OpenGL 1.0/1.1 and OpenGL ES 1.0
 #define QGL_1_1_PROCS \
