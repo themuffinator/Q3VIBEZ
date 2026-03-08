@@ -6,6 +6,8 @@
 
 #include "ui_local.h"
 
+#include <array>
+
 
 #define TEAMMAIN_FRAME	"menu/art/cut_frame"
 
@@ -28,6 +30,34 @@ typedef struct
 } teammain_t;
 
 static teammain_t	s_teammain;
+
+static void TeamMain_MenuEvent( void* ptr, int event );
+
+namespace {
+
+std::array<char, BIG_INFO_STRING> ServerInfoBuffer() {
+	return {};
+}
+
+gametype_t TeamMenuGameType() {
+	auto info = ServerInfoBuffer();
+	trap_GetConfigString( CS_SERVERINFO, info.data(), static_cast<int>( info.size() ) );
+	return static_cast<gametype_t>( atoi( Info_ValueForKey( info.data(), "g_gametype" ) ) );
+}
+
+void InitializeTeamMenuEntry( menutext_s &item, const int id, const int y, const char *const label ) {
+	item.generic.type = MTYPE_PTEXT;
+	item.generic.flags = QMF_CENTER_JUSTIFY | QMF_PULSEIFFOCUS;
+	item.generic.id = id;
+	item.generic.callback = TeamMain_MenuEvent;
+	item.generic.x = 320;
+	item.generic.y = y;
+	item.string = const_cast<char *>( label );
+	item.style = UI_CENTER | UI_SMALLFONT;
+	item.color = colorRed;
+}
+
+}
 
 /*
 ===============
@@ -69,11 +99,10 @@ TeamMain_MenuInit
 ===============
 */
 void TeamMain_MenuInit( void ) {
-	char	info[BIG_INFO_STRING]; // MAX_INFO_STRING
-	gametype_t gametype;
+	const gametype_t gametype = TeamMenuGameType();
 	int		y;
 
-	memset( &s_teammain, 0, sizeof(s_teammain) );
+	s_teammain = {};
 
 	TeamMain_Cache();
 
@@ -90,52 +119,17 @@ void TeamMain_MenuInit( void ) {
 
 	y = 195; // 188
 
-	s_teammain.joinred.generic.type     = MTYPE_PTEXT;
-	s_teammain.joinred.generic.flags    = QMF_CENTER_JUSTIFY|QMF_PULSEIFFOCUS;
-	s_teammain.joinred.generic.id       = ID_JOINRED;
-	s_teammain.joinred.generic.callback = TeamMain_MenuEvent;
-	s_teammain.joinred.generic.x        = 320;
-	s_teammain.joinred.generic.y        = y;
-	s_teammain.joinred.string           = "JOIN RED";
-	s_teammain.joinred.style            = UI_CENTER|UI_SMALLFONT;
-	s_teammain.joinred.color            = colorRed;
+	InitializeTeamMenuEntry( s_teammain.joinred, ID_JOINRED, y, "JOIN RED" );
 	y += INGAME_TEAM_VERTICAL_SPACING;
 
-	s_teammain.joinblue.generic.type     = MTYPE_PTEXT;
-	s_teammain.joinblue.generic.flags    = QMF_CENTER_JUSTIFY|QMF_PULSEIFFOCUS;
-	s_teammain.joinblue.generic.id       = ID_JOINBLUE;
-	s_teammain.joinblue.generic.callback = TeamMain_MenuEvent;
-	s_teammain.joinblue.generic.x        = 320;
-	s_teammain.joinblue.generic.y        = y;
-	s_teammain.joinblue.string           = "JOIN BLUE";
-	s_teammain.joinblue.style            = UI_CENTER|UI_SMALLFONT;
-	s_teammain.joinblue.color            = colorRed;
+	InitializeTeamMenuEntry( s_teammain.joinblue, ID_JOINBLUE, y, "JOIN BLUE" );
 	y += INGAME_TEAM_VERTICAL_SPACING;
 
-	s_teammain.joingame.generic.type     = MTYPE_PTEXT;
-	s_teammain.joingame.generic.flags    = QMF_CENTER_JUSTIFY|QMF_PULSEIFFOCUS;
-	s_teammain.joingame.generic.id       = ID_JOINGAME;
-	s_teammain.joingame.generic.callback = TeamMain_MenuEvent;
-	s_teammain.joingame.generic.x        = 320;
-	s_teammain.joingame.generic.y        = y;
-	s_teammain.joingame.string           = "JOIN GAME";
-	s_teammain.joingame.style            = UI_CENTER|UI_SMALLFONT;
-	s_teammain.joingame.color            = colorRed;
+	InitializeTeamMenuEntry( s_teammain.joingame, ID_JOINGAME, y, "JOIN GAME" );
 	y += INGAME_TEAM_VERTICAL_SPACING;
 
-	s_teammain.spectate.generic.type     = MTYPE_PTEXT;
-	s_teammain.spectate.generic.flags    = QMF_CENTER_JUSTIFY|QMF_PULSEIFFOCUS;
-	s_teammain.spectate.generic.id       = ID_SPECTATE;
-	s_teammain.spectate.generic.callback = TeamMain_MenuEvent;
-	s_teammain.spectate.generic.x        = 320;
-	s_teammain.spectate.generic.y        = y;
-	s_teammain.spectate.string           = "SPECTATE";
-	s_teammain.spectate.style            = UI_CENTER|UI_SMALLFONT;
-	s_teammain.spectate.color            = colorRed;
+	InitializeTeamMenuEntry( s_teammain.spectate, ID_SPECTATE, y, "SPECTATE" );
 	y += INGAME_TEAM_VERTICAL_SPACING;
-
-	trap_GetConfigString( CS_SERVERINFO, info, sizeof( info ) );
-	gametype = static_cast<gametype_t>( atoi( Info_ValueForKey( info, "g_gametype" ) ) );
 			      
 	// set initial states
 	switch( gametype ) {

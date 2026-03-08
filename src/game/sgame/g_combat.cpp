@@ -4,6 +4,100 @@
 
 #include "g_local.h"
 
+#include <algorithm>
+
+namespace {
+
+constexpr float kAlmostObjectiveDistance = 200.0f;
+
+void ConfigureScorePlum( gentity_t &plum, const gentity_t &entity, const int score ) {
+	plum.r.svFlags |= SVF_SINGLECLIENT;
+	plum.r.singleClient = entity.s.number;
+	plum.s.otherEntityNum = entity.s.number;
+	plum.s.time = score;
+}
+
+int DroppedPowerupSeconds( const int expiration_time ) {
+	const int remaining_seconds = ( expiration_time - level.time ) / 1000;
+	return remaining_seconds < 1 ? 1 : remaining_seconds;
+}
+
+void ClearClientPowerups( gclient_t &client ) {
+	std::fill_n( client.ps.powerups, MAX_POWERUPS, 0 );
+}
+
+gentity_t *FindActiveEntityByClassname( const char *classname ) {
+	for ( gentity_t *entity = nullptr; ( entity = G_Find( entity, FOFS( classname ), classname ) ) != nullptr; ) {
+		if ( entity->flags & FL_DROPPED_ITEM ) {
+			continue;
+		}
+
+		return entity;
+	}
+
+	return nullptr;
+}
+
+bool IsNearObjective( const vec3_t player_origin, const vec3_t objective_origin ) {
+	vec3_t direction;
+	VectorSubtract( player_origin, objective_origin, direction );
+	return VectorLength( direction ) < kAlmostObjectiveDistance;
+}
+
+void AwardAlmostObjective( gentity_t &player, gentity_t *attacker ) {
+	player.client->ps.persistant[PERS_PLAYEREVENTS] ^= PLAYEREVENT_HOLYSHIT;
+	if ( attacker && attacker->client ) {
+		attacker->client->ps.persistant[PERS_PLAYEREVENTS] ^= PLAYEREVENT_HOLYSHIT;
+	}
+}
+
+const char *CaptureGoalClassname( const gentity_t &player ) {
+	if ( g_gametype.integer == GT_CTF ) {
+		return player.client->sess.sessionTeam == TEAM_BLUE ? "team_CTF_blueflag" : "team_CTF_redflag";
+	}
+
+	return player.client->sess.sessionTeam == TEAM_BLUE ? "team_CTF_redflag" : "team_CTF_blueflag";
+}
+
+const char *HarvesterGoalClassname( const gentity_t &player ) {
+	return player.client->sess.sessionTeam == TEAM_BLUE ? "team_redobelisk" : "team_blueobelisk";
+}
+
+struct KillerInfo {
+	int number;
+	const char *name;
+};
+
+KillerInfo ResolveKillerInfo( const gentity_t *attacker ) {
+	if ( attacker ) {
+		if ( attacker->client ) {
+			return { attacker->s.number, attacker->client->pers.netname };
+		}
+
+		return { attacker->s.number, "<non-client>" };
+	}
+
+	return { ENTITYNUM_WORLD, "<world>" };
+}
+
+void RefreshFollowingSpectatorScores( const gentity_t &player ) {
+	for ( int client_index = 0; client_index < level.maxclients; ++client_index ) {
+		gclient_t &client = level.clients[client_index];
+		if ( client.pers.connected != CON_CONNECTED ) {
+			continue;
+		}
+		if ( client.sess.sessionTeam != TEAM_SPECTATOR ) {
+			continue;
+		}
+		if ( client.sess.spectatorClient != player.s.number ) {
+			continue;
+		}
+
+		Cmd_Score_f( g_entities + client_index );
+	}
+}
+
+} // namespace
 
 /*
 ============
@@ -11,15 +105,9 @@ ScorePlum
 ============
 */
 void ScorePlum( gentity_t *ent, vec3_t origin, int score ) {
-	gentity_t *plum;
-
-	plum = G_TempEntity( origin, EV_SCOREPLUM );
+	gentity_t *plum = G_TempEntity( origin, EV_SCOREPLUM );
 	// only send this temp entity to a single client
-	plum->r.svFlags |= SVF_SINGLECLIENT;
-	plum->r.singleClient = ent->s.number;
-	//
-	plum->s.otherEntityNum = ent->s.number;
-	plum->s.time = score;
+	ConfigureScorePlum( *plum, *ent, score );
 }
 
 /*
@@ -100,10 +188,7 @@ void TossClientItems( gentity_t *self ) {
 				}
 				drop = Drop_Item( self, item, angle );
 				// decide how many seconds it has left
-				drop->count = ( self->client->ps.powerups[ i ] - level.time ) / 1000;
-				if ( drop->count < 1 ) {
-					drop->count = 1;
-				}
+				drop->count = DroppedPowerupSeconds( self->client->ps.powerups[ i ] );
 				// for pickup prediction
 				drop->s.time2 = drop->count;
 				angle += 45;
@@ -311,45 +396,15 @@ CheckAlmostCapture
 ==================
 */
 void CheckAlmostCapture( gentity_t *self, gentity_t *attacker ) {
-	gentity_t	*ent;
-	vec3_t		dir;
-	char		*classname;
-
 	// if this player was carrying a flag
 	if ( self->client->ps.powerups[PW_REDFLAG] ||
 		self->client->ps.powerups[PW_BLUEFLAG] ||
 		self->client->ps.powerups[PW_NEUTRALFLAG] ) {
-		// get the goal flag this player should have been going for
-		if ( g_gametype.integer == GT_CTF ) {
-			if ( self->client->sess.sessionTeam == TEAM_BLUE ) {
-				classname = "team_CTF_blueflag";
-			}
-			else {
-				classname = "team_CTF_redflag";
-			}
-		}
-		else {
-			if ( self->client->sess.sessionTeam == TEAM_BLUE ) {
-				classname = "team_CTF_redflag";
-			}
-			else {
-				classname = "team_CTF_blueflag";
-			}
-		}
-		ent = NULL;
-		do
-		{
-			ent = G_Find(ent, FOFS(classname), classname);
-		} while (ent && (ent->flags & FL_DROPPED_ITEM));
+		gentity_t *ent = FindActiveEntityByClassname( CaptureGoalClassname( *self ) );
 		// if we found the destination flag and it's not picked up
 		if (ent && !(ent->r.svFlags & SVF_NOCLIENT) ) {
-			// if the player was *very* close
-			VectorSubtract( self->client->ps.origin, ent->s.origin, dir );
-			if ( VectorLength(dir) < 200 ) {
-				self->client->ps.persistant[PERS_PLAYEREVENTS] ^= PLAYEREVENT_HOLYSHIT;
-				if ( attacker->client ) {
-					attacker->client->ps.persistant[PERS_PLAYEREVENTS] ^= PLAYEREVENT_HOLYSHIT;
-				}
+			if ( IsNearObjective( self->client->ps.origin, ent->s.origin ) ) {
+				AwardAlmostObjective( *self, attacker );
 			}
 		}
 	}
@@ -361,28 +416,13 @@ CheckAlmostScored
 ==================
 */
 void CheckAlmostScored( gentity_t *self, gentity_t *attacker ) {
-	gentity_t	*ent;
-	vec3_t		dir;
-	char		*classname;
-
 	// if the player was carrying cubes
 	if ( self->client->ps.generic1 ) {
-		if ( self->client->sess.sessionTeam == TEAM_BLUE ) {
-			classname = "team_redobelisk";
-		}
-		else {
-			classname = "team_blueobelisk";
-		}
-		ent = G_Find(NULL, FOFS(classname), classname);
+		gentity_t *ent = G_Find( nullptr, FOFS( classname ), HarvesterGoalClassname( *self ) );
 		// if we found the destination obelisk
 		if ( ent ) {
-			// if the player was *very* close
-			VectorSubtract( self->client->ps.origin, ent->s.origin, dir );
-			if ( VectorLength(dir) < 200 ) {
-				self->client->ps.persistant[PERS_PLAYEREVENTS] ^= PLAYEREVENT_HOLYSHIT;
-				if ( attacker->client ) {
-					attacker->client->ps.persistant[PERS_PLAYEREVENTS] ^= PLAYEREVENT_HOLYSHIT;
-				}
+			if ( IsNearObjective( self->client->ps.origin, ent->s.origin ) ) {
+				AwardAlmostObjective( *self, attacker );
 			}
 		}
 	}
@@ -397,9 +437,7 @@ void player_die( gentity_t *self, gentity_t *inflictor, gentity_t *attacker, int
 	gentity_t	*ent;
 	int			anim;
 	int			contents;
-	int			killer;
-	int			i;
-	char		*killerName, *obit;
+	const char	*obit;
 
 	if ( self->client->ps.pm_type == PM_DEAD ) {
 		return;
@@ -429,21 +467,10 @@ void player_die( gentity_t *self, gentity_t *inflictor, gentity_t *attacker, int
 #endif
 	self->client->ps.pm_type = PM_DEAD;
 
-	if ( attacker ) {
-		killer = attacker->s.number;
-		if ( attacker->client ) {
-			killerName = attacker->client->pers.netname;
-		} else {
-			killerName = "<non-client>";
-		}
-	} else {
-		killer = ENTITYNUM_WORLD;
-		killerName = "<world>";
-	}
+	KillerInfo killer = ResolveKillerInfo( attacker );
 
-	if ( killer < 0 || killer >= MAX_CLIENTS ) {
-		killer = ENTITYNUM_WORLD;
-		killerName = "<world>";
+	if ( killer.number < 0 || killer.number >= MAX_CLIENTS ) {
+		killer = { ENTITYNUM_WORLD, "<world>" };
 	}
 
 	if ( (unsigned)meansOfDeath >= ARRAY_LEN( modNames ) ) {
@@ -453,14 +480,14 @@ void player_die( gentity_t *self, gentity_t *inflictor, gentity_t *attacker, int
 	}
 
 	G_LogPrintf("Kill: %i %i %i: %s killed %s by %s\n", 
-		killer, self->s.number, meansOfDeath, killerName, 
+		killer.number, self->s.number, meansOfDeath, killer.name, 
 		self->client->pers.netname, obit );
 
 	// broadcast the death event to everyone
 	ent = G_TempEntity( self->r.currentOrigin, EV_OBITUARY );
 	ent->s.eventParm = meansOfDeath;
 	ent->s.otherEntityNum = self - g_entities;
-	ent->s.otherEntityNum2 = killer;
+	ent->s.otherEntityNum2 = killer.number;
 	ent->r.svFlags = SVF_BROADCAST;	// send to everyone
 
 	self->enemy = attacker;
@@ -552,22 +579,7 @@ void player_die( gentity_t *self, gentity_t *inflictor, gentity_t *attacker, int
 #endif
 
 	Cmd_Score_f( self );		// show scores
-	// send updated scores to any clients that are following this one,
-	// or they would get stale scoreboards
-	for ( i = 0 ; i < level.maxclients ; i++ ) {
-		gclient_t	*client;
-
-		client = &level.clients[i];
-		if ( client->pers.connected != CON_CONNECTED ) {
-			continue;
-		}
-		if ( client->sess.sessionTeam != TEAM_SPECTATOR ) {
-			continue;
-		}
-		if ( client->sess.spectatorClient == self->s.number ) {
-			Cmd_Score_f( g_entities + i );
-		}
-	}
+	RefreshFollowingSpectatorScores( *self );
 
 	self->takedamage = qtrue;	// can still be gibbed
 
@@ -608,12 +620,12 @@ void player_die( gentity_t *self, gentity_t *inflictor, gentity_t *attacker, int
 	self->client->respawnTime = level.time + 1700;
 
 	// remove powerups
-	memset( self->client->ps.powerups, 0, sizeof(self->client->ps.powerups) );
+	ClearClientPowerups( *self->client );
 
 	// never gib in a nodrop
 	if ( (self->health <= GIB_HEALTH && !(contents & CONTENTS_NODROP) && g_blood.integer) || meansOfDeath == MOD_SUICIDE) {
 		// gib death
-		GibEntity( self, killer );
+		GibEntity( self, killer.number );
 	} else {
 		// normal death
 		static int i;
@@ -642,7 +654,7 @@ void player_die( gentity_t *self, gentity_t *inflictor, gentity_t *attacker, int
 		self->client->ps.torsoAnim = 
 			( ( self->client->ps.torsoAnim & ANIM_TOGGLEBIT ) ^ ANIM_TOGGLEBIT ) | anim;
 
-		G_AddEvent( self, EV_DEATH1 + i, killer );
+		G_AddEvent( self, EV_DEATH1 + i, killer.number );
 
 		// the body can still be gibbed
 		self->die = body_die;

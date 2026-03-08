@@ -11,6 +11,9 @@ CONTROLS MENU
 
 #include "ui_local.h"
 
+#include <array>
+#include <span>
+
 #define ART_BACK0			"menu/art/back_0"
 #define ART_BACK1			"menu/art/back_1"
 #define ART_FRAMEL			"menu/art/frame2_l"
@@ -18,8 +21,8 @@ CONTROLS MENU
 
 
 typedef struct {
-	char	*command;
-	char	*label;
+	const char	*command;
+	const char	*label;
 	int		id;
 	int		anim;
 	int		defaultbind1;
@@ -30,7 +33,7 @@ typedef struct {
 
 typedef struct
 {
-	char*	name;
+	const char	*name;
 	float	defaultvalue;
 	float	value;	
 } configcvar_t;
@@ -205,8 +208,7 @@ static controls_t s_controls;
 
 static vec4_t controls_binding_color  = {1.00f, 0.43f, 0.00f, 1.00f}; // bk: Win32 C4305
 
-static bind_t g_bindings[] = 
-{
+static auto g_bindings = std::to_array<bind_t>( {
 	{"+scores",			"show scores",		ID_SHOWSCORES,	ANIM_IDLE,		K_TAB,			-1,		-1, -1},
 	{"+button2",		"use item",			ID_USEITEM,		ANIM_IDLE,		K_ENTER,		-1,		-1, -1},
 	{"+speed", 			"run / walk",		ID_SPEED,		ANIM_RUN,		K_SHIFT,		-1,		-1,	-1},
@@ -241,11 +243,9 @@ static bind_t g_bindings[] =
 	{"messagemode2", 	"chat - team",		ID_CHAT2,		ANIM_CHAT,		-1,				-1,		-1, -1},
 	{"messagemode3", 	"chat - target",	ID_CHAT3,		ANIM_CHAT,		-1,				-1,		-1, -1},
 	{"messagemode4", 	"chat - attacker",	ID_CHAT4,		ANIM_CHAT,		-1,				-1,		-1, -1},
-	{(char*)NULL,		(char*)NULL,		0,				0,				-1,				-1,		-1,	-1},
-};
+} );
 
-static configcvar_t g_configcvars[] =
-{
+static auto g_configcvars = std::to_array<configcvar_t>( {
 	{"cl_run",			0,					0},
 	{"m_pitch",			0,					0},
 	{"cg_autoswitch",	0,					0},
@@ -254,11 +254,9 @@ static configcvar_t g_configcvars[] =
 	{"joy_threshold",	0,					0},
 	{"m_filter",		0,					0},
 	{"cl_freelook",		0,					0},
-	{NULL,				0,					0}
-};
+} );
 
-static menucommon_s *g_movement_controls[] =
-{
+static auto g_movement_controls = std::to_array<menucommon_s *>( {
 	(menucommon_s *)&s_controls.alwaysrun,     
 	(menucommon_s *)&s_controls.run,            
 	(menucommon_s *)&s_controls.walkforward,
@@ -270,10 +268,9 @@ static menucommon_s *g_movement_controls[] =
 	(menucommon_s *)&s_controls.turnleft,      
 	(menucommon_s *)&s_controls.turnright,     
 	(menucommon_s *)&s_controls.sidestep,
-	NULL
-};
+} );
 
-static menucommon_s *g_weapons_controls[] = {
+static auto g_weapons_controls = std::to_array<menucommon_s *>( {
 	(menucommon_s *)&s_controls.attack,           
 	(menucommon_s *)&s_controls.nextweapon,
 	(menucommon_s *)&s_controls.prevweapon,
@@ -287,10 +284,9 @@ static menucommon_s *g_weapons_controls[] = {
 	(menucommon_s *)&s_controls.railgun,          
 	(menucommon_s *)&s_controls.plasma,           
 	(menucommon_s *)&s_controls.bfg,              
-	NULL,
-};
+} );
 
-static menucommon_s *g_looking_controls[] = {
+static auto g_looking_controls = std::to_array<menucommon_s *>( {
 	(menucommon_s *)&s_controls.sensitivity,
 	(menucommon_s *)&s_controls.smoothmouse,
 	(menucommon_s *)&s_controls.invertmouse,
@@ -302,10 +298,9 @@ static menucommon_s *g_looking_controls[] = {
 	(menucommon_s *)&s_controls.zoomview,
 	(menucommon_s *)&s_controls.joyenable,
 	(menucommon_s *)&s_controls.joythreshold,
-	NULL,
-};
+} );
 
-static menucommon_s *g_misc_controls[] = {
+static auto g_misc_controls = std::to_array<menucommon_s *>( {
 	(menucommon_s *)&s_controls.showscores, 
 	(menucommon_s *)&s_controls.useitem,
 	(menucommon_s *)&s_controls.gesture,
@@ -313,15 +308,52 @@ static menucommon_s *g_misc_controls[] = {
 	(menucommon_s *)&s_controls.chat2,
 	(menucommon_s *)&s_controls.chat3,
 	(menucommon_s *)&s_controls.chat4,
-	NULL,
-};
+} );
 
-static menucommon_s **g_controls[] = {
-	g_movement_controls,
-	g_looking_controls,
-	g_weapons_controls,
-	g_misc_controls,
-};
+namespace {
+
+static std::array<char, 32> controlsPlayerName{};
+
+[[nodiscard]] auto ControlGroups() -> std::array<std::span<menucommon_s *>, C_MAX> {
+	return { g_movement_controls, g_looking_controls, g_weapons_controls, g_misc_controls };
+}
+
+[[nodiscard]] auto ControlsForSection( const int section ) -> std::span<menucommon_s *> {
+	switch ( section ) {
+	case C_MOVEMENT:
+		return g_movement_controls;
+	case C_LOOKING:
+		return g_looking_controls;
+	case C_WEAPONS:
+		return g_weapons_controls;
+	case C_MISC:
+		return g_misc_controls;
+	default:
+		return g_looking_controls;
+	}
+}
+
+[[nodiscard]] auto FindConfigCvar( const char *name ) -> configcvar_t * {
+	for ( auto &cvar : g_configcvars ) {
+		if ( !strcmp( cvar.name, name ) ) {
+			return &cvar;
+		}
+	}
+
+	return nullptr;
+}
+
+[[nodiscard]] auto FindBindingById( const int id ) -> bind_t * {
+	for ( auto &binding : g_bindings ) {
+		if ( binding.id == id ) {
+			return &binding;
+		}
+	}
+
+	return nullptr;
+}
+
+} // namespace
 
 /*
 =================
@@ -330,23 +362,16 @@ Controls_InitCvars
 */
 static void Controls_InitCvars( void )
 {
-	configcvar_t*	cvarptr;
-
-	cvarptr = g_configcvars;
-	for ( ; ; cvarptr++ )
-	{
-		if (!cvarptr->name)
-			break;
-
+	for ( auto &cvar : g_configcvars ) {
 		// get current value
-		cvarptr->value = trap_Cvar_VariableValue( cvarptr->name );
+		cvar.value = trap_Cvar_VariableValue( cvar.name );
 
 		// get default value
-		trap_Cvar_Reset( cvarptr->name );
-		cvarptr->defaultvalue = trap_Cvar_VariableValue( cvarptr->name );
+		trap_Cvar_Reset( cvar.name );
+		cvar.defaultvalue = trap_Cvar_VariableValue( cvar.name );
 
 		// restore current value
-		trap_Cvar_SetValue( cvarptr->name, cvarptr->value );
+		trap_Cvar_SetValue( cvar.name, cvar.value );
 	}
 }
 
@@ -355,21 +380,14 @@ static void Controls_InitCvars( void )
 Controls_GetCvarDefault
 =================
 */
-static float Controls_GetCvarDefault( char* name )
+static float Controls_GetCvarDefault( const char *name )
 {
-	configcvar_t*	cvarptr;
-
-	cvarptr = g_configcvars;
-	for ( ; ; cvarptr++ )
-	{
-		if (!cvarptr->name)
-			return (0);
-
-		if (!strcmp(cvarptr->name,name))
-			break;
+	const configcvar_t *const cvar = FindConfigCvar( name );
+	if ( !cvar ) {
+		return 0;
 	}
 
-	return (cvarptr->defaultvalue);
+	return cvar->defaultvalue;
 }
 
 /*
@@ -377,21 +395,14 @@ static float Controls_GetCvarDefault( char* name )
 Controls_GetCvarValue
 =================
 */
-static float Controls_GetCvarValue( char* name )
+static float Controls_GetCvarValue( const char *name )
 {
-	configcvar_t*	cvarptr;
-
-	cvarptr = g_configcvars;
-	for ( ; ; cvarptr++ )
-	{
-		if (!cvarptr->name)
-			return (0);
-
-		if (!strcmp(cvarptr->name,name))
-			break;
+	const configcvar_t *const cvar = FindConfigCvar( name );
+	if ( !cvar ) {
+		return 0;
 	}
 
-	return (cvarptr->value);
+	return cvar->value;
 }
 
 
@@ -529,44 +540,37 @@ Controls_Update
 =================
 */
 static void Controls_Update( void ) {
-	int		i;
-	int		j;
 	int		y;
-	menucommon_s	**controls;
-	menucommon_s	*control;
 
 	// disable all controls in all groups
-	for( i = 0; i < C_MAX; i++ ) {
-		controls = g_controls[i];
-		// bk001204 - parentheses
-		for( j = 0;  (control = controls[j]) != NULL ; j++ ) {
+	for ( const auto controls : ControlGroups() ) {
+		for ( menucommon_s *const control : controls ) {
 			control->flags |= (QMF_HIDDEN|QMF_INACTIVE);
 		}
 	}
 
-	controls = g_controls[s_controls.section];
+	const auto controls = ControlsForSection( s_controls.section );
 
 	// enable controls in active group (and count number of items for vertical centering)
-	// bk001204 - parentheses
-	for( j = 0;  (control = controls[j]) != NULL ; j++ ) {
+	for ( menucommon_s *const control : controls ) {
 		control->flags &= ~(QMF_GRAYED|QMF_HIDDEN|QMF_INACTIVE);
 	}
 
 	// position controls
-	y = ( SCREEN_HEIGHT - j * SMALLCHAR_HEIGHT ) / 2;
-	// bk001204 - parentheses
-	for( j = 0;	(control = controls[j]) != NULL; j++, y += SMALLCHAR_HEIGHT ) {
+	y = ( SCREEN_HEIGHT - static_cast<int>( controls.size() ) * SMALLCHAR_HEIGHT ) / 2;
+	for ( menucommon_s *const control : controls ) {
 		control->x      = 320;
 		control->y      = y;
 		control->left   = 320 - 19*SMALLCHAR_WIDTH;
 		control->right  = 320 + 21*SMALLCHAR_WIDTH;
 		control->top    = y;
 		control->bottom = y + SMALLCHAR_HEIGHT;
+		y += SMALLCHAR_HEIGHT;
 	}
 
 	if( s_controls.waitingforkey ) {
 		// disable everybody
-		for( i = 0; i < s_controls.menu.nitems; i++ ) {
+		for ( int i = 0; i < s_controls.menu.nitems; i++ ) {
 			((menucommon_s*)(s_controls.menu.items[i]))->flags |= QMF_GRAYED;
 		}
 
@@ -580,7 +584,7 @@ static void Controls_Update( void ) {
 	}
 
 	// enable everybody
-	for( i = 0; i < s_controls.menu.nitems; i++ ) {
+	for ( int i = 0; i < s_controls.menu.nitems; i++ ) {
 		((menucommon_s*)(s_controls.menu.items[i]))->flags &= ~QMF_GRAYED;
 	}
 
@@ -633,8 +637,8 @@ static void Controls_DrawKeyBinding( void *self )
 	int				b1;
 	int				b2;
 	qboolean		c;
-	char			name[32];
-	char			name2[32];
+	std::array<char, 32>	name{};
+	std::array<char, 32>	name2{};
 
 	a = (menuaction_s*) self;
 
@@ -645,20 +649,20 @@ static void Controls_DrawKeyBinding( void *self )
 
 	b1 = g_bindings[a->generic.id].bind1;
 	if (b1 == -1)
-		strcpy(name,"???");
+		Q_strncpyz( name.data(), "???", name.size() );
 	else
 	{
-		trap_Key_KeynumToStringBuf( b1, name, 32 );
-		Q_strupr(name);
+		trap_Key_KeynumToStringBuf( b1, name.data(), name.size() );
+		Q_strupr( name.data() );
 
 		b2 = g_bindings[a->generic.id].bind2;
 		if (b2 != -1)
 		{
-			trap_Key_KeynumToStringBuf( b2, name2, 32 );
-			Q_strupr(name2);
+			trap_Key_KeynumToStringBuf( b2, name2.data(), name2.size() );
+			Q_strupr( name2.data() );
 
-			strcat( name, " or " );
-			strcat( name, name2 );
+			Q_strcat( name.data(), name.size(), " or " );
+			Q_strcat( name.data(), name.size(), name2.data() );
 		}
 	}
 
@@ -667,7 +671,7 @@ static void Controls_DrawKeyBinding( void *self )
 		UI_FillRect( a->generic.left, a->generic.top, a->generic.right-a->generic.left+1, a->generic.bottom-a->generic.top+1, listbar_color ); 
 
 		UI_DrawString( x - SMALLCHAR_WIDTH, y, g_bindings[a->generic.id].label, UI_RIGHT|UI_SMALLFONT, text_color_highlight );
-		UI_DrawString( x + SMALLCHAR_WIDTH, y, name, UI_LEFT|UI_SMALLFONT|UI_PULSE, text_color_highlight );
+		UI_DrawString( x + SMALLCHAR_WIDTH, y, name.data(), UI_LEFT|UI_SMALLFONT|UI_PULSE, text_color_highlight );
 
 		if (s_controls.waitingforkey)
 		{
@@ -686,12 +690,12 @@ static void Controls_DrawKeyBinding( void *self )
 		if (a->generic.flags & QMF_GRAYED)
 		{
 			UI_DrawString( x - SMALLCHAR_WIDTH, y, g_bindings[a->generic.id].label, UI_RIGHT|UI_SMALLFONT, text_color_disabled );
-			UI_DrawString( x + SMALLCHAR_WIDTH, y, name, UI_LEFT|UI_SMALLFONT, text_color_disabled );
+			UI_DrawString( x + SMALLCHAR_WIDTH, y, name.data(), UI_LEFT|UI_SMALLFONT, text_color_disabled );
 		}
 		else
 		{
 			UI_DrawString( x - SMALLCHAR_WIDTH, y, g_bindings[a->generic.id].label, UI_RIGHT|UI_SMALLFONT, controls_binding_color );
-			UI_DrawString( x + SMALLCHAR_WIDTH, y, name, UI_LEFT|UI_SMALLFONT, controls_binding_color );
+			UI_DrawString( x + SMALLCHAR_WIDTH, y, name.data(), UI_LEFT|UI_SMALLFONT, controls_binding_color );
 		}
 	}
 }
@@ -714,12 +718,12 @@ Controls_DrawPlayer
 */
 static void Controls_DrawPlayer( void *self ) {
 	menubitmap_s	*b;
-	char			buf[MAX_QPATH];
+	std::array<char, MAX_QPATH> modelName{};
 
-	trap_Cvar_VariableStringBuffer( "model", buf, sizeof( buf ) );
-	if ( strcmp( buf, s_controls.playerModel ) != 0 ) {
-		UI_PlayerInfo_SetModel( &s_controls.playerinfo, buf );
-		strcpy( s_controls.playerModel, buf );
+	trap_Cvar_VariableStringBuffer( "model", modelName.data(), modelName.size() );
+	if ( strcmp( modelName.data(), s_controls.playerModel ) != 0 ) {
+		UI_PlayerInfo_SetModel( &s_controls.playerinfo, modelName.data() );
+		Q_strncpyz( s_controls.playerModel, modelName.data(), sizeof( s_controls.playerModel ) );
 		Controls_UpdateModel( ANIM_IDLE );
 	}
 
@@ -733,22 +737,22 @@ static void Controls_DrawPlayer( void *self ) {
 Controls_GetKeyAssignment
 =================
 */
-static void Controls_GetKeyAssignment (char *command, int *twokeys)
+static void Controls_GetKeyAssignment( const char *command, std::array<int, 2> &twokeys )
 {
 	int		count;
 	int		j;
-	char	b[256];
+	std::array<char, 256> bindingBuffer{};
 
 	twokeys[0] = twokeys[1] = -1;
 	count = 0;
 
 	for ( j = 0; j < 256; j++ )
 	{
-		trap_Key_GetBindingBuf( j, b, 256 );
-		if ( *b == 0 ) {
+		trap_Key_GetBindingBuf( j, bindingBuffer.data(), bindingBuffer.size() );
+		if ( bindingBuffer[0] == '\0' ) {
 			continue;
 		}
-		if ( !Q_stricmp( b, command ) ) {
+		if ( !Q_stricmp( bindingBuffer.data(), command ) ) {
 			twokeys[count] = j;
 			count++;
 			if (count == 2)
@@ -764,22 +768,13 @@ Controls_GetConfig
 */
 static void Controls_GetConfig( void )
 {
-	int		twokeys[2];
-	bind_t*	bindptr;
+	std::array<int, 2>	twokeys{};
 
 	// put the bindings into a local store
-	bindptr = g_bindings;
-
-	// iterate each command, get its numeric binding
-	for ( ; ; bindptr++ )
-	{
-		if (!bindptr->label)
-			break;
-
-		Controls_GetKeyAssignment(bindptr->command, twokeys);
-
-		bindptr->bind1 = twokeys[0];
-		bindptr->bind2 = twokeys[1];
+	for ( auto &binding : g_bindings ) {
+		Controls_GetKeyAssignment( binding.command, twokeys );
+		binding.bind1 = twokeys[0];
+		binding.bind2 = twokeys[1];
 	}
 
 	s_controls.invertmouse.curvalue  = Controls_GetCvarValue( "m_pitch" ) < 0;
@@ -799,23 +794,13 @@ Controls_SetConfig
 */
 static void Controls_SetConfig( void )
 {
-	bind_t*	bindptr;
-
-	// set the bindings from the local store
-	bindptr = g_bindings;
-
-	// iterate each command, get its numeric binding
-	for ( ; ; bindptr++ )
-	{
-		if (!bindptr->label)
-			break;
-
-		if (bindptr->bind1 != -1)
+	for ( const auto &binding : g_bindings ) {
+		if ( binding.bind1 != -1 )
 		{	
-			trap_Key_SetBinding( bindptr->bind1, bindptr->command );
+			trap_Key_SetBinding( binding.bind1, binding.command );
 
-			if (bindptr->bind2 != -1)
-				trap_Key_SetBinding( bindptr->bind2, bindptr->command );
+			if ( binding.bind2 != -1 )
+				trap_Key_SetBinding( binding.bind2, binding.command );
 		}
 	}
 
@@ -841,19 +826,9 @@ Controls_SetDefaults
 */
 static void Controls_SetDefaults( void )
 {
-	bind_t*	bindptr;
-
-	// set the bindings from the local store
-	bindptr = g_bindings;
-
-	// iterate each command, set its default binding
-	for ( ; ; bindptr++ )
-	{
-		if (!bindptr->label)
-			break;
-
-		bindptr->bind1 = bindptr->defaultbind1;
-		bindptr->bind2 = bindptr->defaultbind2;
+	for ( auto &binding : g_bindings ) {
+		binding.bind1 = binding.defaultbind1;
+		binding.bind2 = binding.defaultbind2;
 	}
 
 	s_controls.invertmouse.curvalue  = Controls_GetCvarDefault( "m_pitch" ) < 0;
@@ -875,7 +850,6 @@ static sfxHandle_t Controls_MenuKey( int key )
 {
 	int			id;
 	qboolean	found;
-	bind_t*		bindptr;
 	found = qfalse;
 
 	if (!s_controls.waitingforkey)
@@ -920,61 +894,42 @@ static sfxHandle_t Controls_MenuKey( int key )
 	if (key != -1)
 	{
 		// remove from any other bind
-		bindptr = g_bindings;
-		for ( ; ; bindptr++ )
-		{
-			if (!bindptr->label)	
-				break;
+		for ( auto &binding : g_bindings ) {
+			if ( binding.bind2 == key )
+				binding.bind2 = -1;
 
-			if (bindptr->bind2 == key)
-				bindptr->bind2 = -1;
-
-			if (bindptr->bind1 == key)
+			if ( binding.bind1 == key )
 			{
-				bindptr->bind1 = bindptr->bind2;	
-				bindptr->bind2 = -1;
+				binding.bind1 = binding.bind2;	
+				binding.bind2 = -1;
 			}
 		}
 	}
 
 	// assign key to local store
 	id      = ((menucommon_s*)(s_controls.menu.items[s_controls.menu.cursor]))->id;
-	bindptr = g_bindings;
-	for ( ; ; bindptr++ )
-	{
-		if (!bindptr->label)	
-			break;
-		
-		if (bindptr->id == id)
-		{
-			found = qtrue;
-			if (key == -1)
-			{
-				if( bindptr->bind1 != -1 ) {
-					trap_Key_SetBinding( bindptr->bind1, "" );
-					bindptr->bind1 = -1;
-				}
-				if( bindptr->bind2 != -1 ) {
-					trap_Key_SetBinding( bindptr->bind2, "" );
-					bindptr->bind2 = -1;
-				}
+	if ( bind_t *const binding = FindBindingById( id ) ) {
+		found = qtrue;
+		if ( key == -1 ) {
+			if ( binding->bind1 != -1 ) {
+				trap_Key_SetBinding( binding->bind1, "" );
+				binding->bind1 = -1;
 			}
-			else if (bindptr->bind1 == -1) {
-				bindptr->bind1 = key;
+			if ( binding->bind2 != -1 ) {
+				trap_Key_SetBinding( binding->bind2, "" );
+				binding->bind2 = -1;
 			}
-			else if (bindptr->bind1 != key && bindptr->bind2 == -1) {
-				bindptr->bind2 = key;
-			}
-			else
-			{
-				trap_Key_SetBinding( bindptr->bind1, "" );
-				trap_Key_SetBinding( bindptr->bind2, "" );
-				bindptr->bind1 = key;
-				bindptr->bind2 = -1;
-			}						
-			break;
+		} else if ( binding->bind1 == -1 ) {
+			binding->bind1 = key;
+		} else if ( binding->bind1 != key && binding->bind2 == -1 ) {
+			binding->bind2 = key;
+		} else {
+			trap_Key_SetBinding( binding->bind1, "" );
+			trap_Key_SetBinding( binding->bind2, "" );
+			binding->bind1 = key;
+			binding->bind2 = -1;
 		}
-	}				
+	}
 		
 	s_controls.waitingforkey = qfalse;
 
@@ -1130,7 +1085,7 @@ Controls_InitModel
 */
 static void Controls_InitModel( void )
 {
-	memset( &s_controls.playerinfo, 0, sizeof(playerInfo_t) );
+	s_controls.playerinfo = {};
 
 	UI_PlayerInfo_SetModel( &s_controls.playerinfo, UI_Cvar_VariableString( "model" ) );
 
@@ -1160,10 +1115,8 @@ Controls_MenuInit
 */
 static void Controls_MenuInit( void )
 {
-	static char playername[32];
-
 	// zero set all our globals
-	memset( &s_controls, 0 ,sizeof(controls_t) );
+	s_controls = {};
 
 	Controls_Cache();
 
@@ -1530,7 +1483,7 @@ static void Controls_MenuInit( void )
 	s_controls.name.generic.flags	= QMF_CENTER_JUSTIFY|QMF_INACTIVE;
 	s_controls.name.generic.x		= 320;
 	s_controls.name.generic.y		= 440;
-	s_controls.name.string			= playername;
+	s_controls.name.string			= controlsPlayerName.data();
 	s_controls.name.style			= UI_CENTER;
 	s_controls.name.color			= text_color_normal;
 
@@ -1593,8 +1546,8 @@ static void Controls_MenuInit( void )
 
 	Menu_AddItem( &s_controls.menu, &s_controls.back );
 
-	trap_Cvar_VariableStringBuffer( "name", s_controls.name.string, 16 );
-	Q_CleanStr( s_controls.name.string );
+	trap_Cvar_VariableStringBuffer( "name", controlsPlayerName.data(), 16 );
+	Q_CleanStr( controlsPlayerName.data() );
 
 	// initialize the configurable cvars
 	Controls_InitCvars();

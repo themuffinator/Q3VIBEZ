@@ -4,6 +4,100 @@
 // for a 3D rendering
 #include "cg_local.h"
 
+#include <algorithm>
+#include <array>
+
+namespace {
+
+[[nodiscard]] constexpr int NextBufferedSoundIndex( const int index ) noexcept {
+	return ( index + 1 ) % MAX_SOUNDBUFFER;
+}
+
+[[nodiscard]] constexpr int ClampedViewSize( const int viewSize ) noexcept {
+	return std::clamp( viewSize, 30, 100 );
+}
+
+void UpdateViewSizeCvarIfNeeded( const int requestedViewSize, const int clampedViewSize ) {
+	if ( requestedViewSize == clampedViewSize ) {
+		return;
+	}
+
+	trap_Cvar_Set( "cg_viewsize", clampedViewSize == 30 ? "30" : "100" );
+}
+
+void ClearBufferedSoundsState() {
+	cg.soundBufferIn = 0;
+	cg.soundBufferOut = 0;
+	cg.soundBuffer.fill( 0 );
+}
+
+[[nodiscard]] bool TryPopBufferedSound( sfxHandle_t &sound ) {
+	if ( cg.soundBufferOut == cg.soundBufferIn ) {
+		return false;
+	}
+
+	sound = cg.soundBuffer[cg.soundBufferOut];
+	if ( !sound ) {
+		return false;
+	}
+
+	cg.soundBuffer[cg.soundBufferOut] = 0;
+	cg.soundBufferOut = NextBufferedSoundIndex( cg.soundBufferOut );
+	return true;
+}
+
+void UpdateVoteStateFromConfig() {
+	cgs.voteTime = atoi( CG_ConfigString( CS_VOTE_TIME ) );
+	cgs.voteYes = atoi( CG_ConfigString( CS_VOTE_YES ) );
+	cgs.voteNo = atoi( CG_ConfigString( CS_VOTE_NO ) );
+	Q_strncpyz( cgs.voteString, CG_ConfigString( CS_VOTE_STRING ), sizeof( cgs.voteString ) );
+	cgs.voteModified = cgs.voteTime ? qtrue : qfalse;
+}
+
+void SendFollowClientCommand() {
+	if ( cg.demoPlayback ) {
+		return;
+	}
+
+	trap_SendConsoleCommand( va( "follow %i\n", cg.followClient ) );
+}
+
+void UpdateTimescaleFade() {
+	if ( cg_timescale.value == cg_timescaleFadeEnd.value ) {
+		return;
+	}
+
+	const float fadeStep = cg_timescaleFadeSpeed.value * static_cast<float>( cg.frametime ) / 1000.0f;
+	if ( cg_timescale.value < cg_timescaleFadeEnd.value ) {
+		cg_timescale.value = std::min( cg_timescale.value + fadeStep, cg_timescaleFadeEnd.value );
+	} else {
+		cg_timescale.value = std::max( cg_timescale.value - fadeStep, cg_timescaleFadeEnd.value );
+	}
+
+	if ( cg_timescaleFadeSpeed.value != 0.0f ) {
+		std::array<char, 32> timescaleValue{};
+		Com_sprintf( timescaleValue.data(), static_cast<int>( timescaleValue.size() ), "%f", cg_timescale.value );
+		trap_Cvar_Set( "timescale", timescaleValue.data() );
+	}
+}
+
+void ApplyDeadThirdPersonFocus( vec3_t focusAngles ) {
+	if ( cg.predictedPlayerState.stats[STAT_HEALTH] > 0 ) {
+		return;
+	}
+
+	focusAngles[YAW] = cg.predictedPlayerState.stats[STAT_DEAD_YAW];
+	cg.refdefViewAngles[YAW] = cg.predictedPlayerState.stats[STAT_DEAD_YAW];
+}
+
+void ClampThirdPersonFocusPitch( vec3_t focusAngles ) {
+	if ( focusAngles[PITCH] > 45 ) {
+		focusAngles[PITCH] = 45;
+	}
+}
+
+} // namespace
+
 
 /*
 =============================================================================
@@ -51,7 +145,7 @@ can then be moved around
 void CG_TestModel_f (void) {
 	vec3_t		angles;
 
-	memset( &cg.testModelEntity, 0, sizeof(cg.testModelEntity) );
+	cg.testModelEntity = refEntity_t{};
 	if ( trap_Argc() < 2 ) {
 		return;
 	}
@@ -167,17 +261,8 @@ static void CG_CalcVrect (void) {
 	if ( cg.snap->ps.pm_type == PM_INTERMISSION ) {
 		size = 100;
 	} else {
-		// bound normal viewsize
-		if (cg_viewsize.integer < 30) {
-			trap_Cvar_Set ("cg_viewsize","30");
-			size = 30;
-		} else if (cg_viewsize.integer > 100) {
-			trap_Cvar_Set ("cg_viewsize","100");
-			size = 100;
-		} else {
-			size = cg_viewsize.integer;
-		}
-
+		size = ClampedViewSize( cg_viewsize.integer );
+		UpdateViewSizeCvarIfNeeded( cg_viewsize.integer, size );
 	}
 	cg.refdef.width = cgs.glconfig.vidWidth*size/100;
 	cg.refdef.width &= ~1;
@@ -213,17 +298,9 @@ static void CG_OffsetThirdPersonView( void ) {
 	cg.refdef.vieworg[2] += cg.predictedPlayerState.viewheight;
 
 	VectorCopy( cg.refdefViewAngles, focusAngles );
-
-	// if dead, look at killer
-	if ( cg.predictedPlayerState.stats[STAT_HEALTH] <= 0 ) {
-		focusAngles[YAW] = cg.predictedPlayerState.stats[STAT_DEAD_YAW];
-		cg.refdefViewAngles[YAW] = cg.predictedPlayerState.stats[STAT_DEAD_YAW];
-	}
-
-	if ( focusAngles[PITCH] > 45 ) {
-		focusAngles[PITCH] = 45;		// don't go too far overhead
-	}
-	AngleVectors( focusAngles, forward, NULL, NULL );
+	ApplyDeadThirdPersonFocus( focusAngles );
+	ClampThirdPersonFocusPitch( focusAngles );
+	AngleVectors( focusAngles, forward, nullptr, nullptr );
 
 	VectorMA( cg.refdef.vieworg, FOCUS_DISTANCE, forward, focusPoint );
 
@@ -552,7 +629,7 @@ CG_DamageBlendBlob
 static void CG_DamageBlendBlob( void ) {
 	int			t;
 	int			maxTime;
-	refEntity_t		ent;
+	refEntity_t		ent{};
 
 	if (!cg_blood.integer) {
 		return;
@@ -578,7 +655,6 @@ static void CG_DamageBlendBlob( void ) {
 	}
 
 
-	memset( &ent, 0, sizeof( ent ) );
 	ent.reType = RT_SPRITE;
 	ent.renderfx = RF_FIRST_PERSON;
 
@@ -606,7 +682,7 @@ Sets cg.refdef view values
 static int CG_CalcViewValues( void ) {
 	playerState_t	*ps;
 
-	memset( &cg.refdef, 0, sizeof( cg.refdef ) );
+	cg.refdef = refdef_t{};
 
 	// strings for in game rendering
 	// Q_strncpyz( cg.refdef.text[0], "Park Ranger", sizeof(cg.refdef.text[0]) );
@@ -706,7 +782,7 @@ static void CG_PowerupTimerSounds( void ) {
 			continue;
 		}
 		if ( ( t - cg.time ) / POWERUP_BLINK_TIME != ( t - cg.oldTime ) / POWERUP_BLINK_TIME ) {
-			trap_S_StartSound( NULL, cg.snap->ps.clientNum, CHAN_ITEM, cgs.media.wearOffSound );
+			trap_S_StartSound( nullptr, cg.snap->ps.clientNum, CHAN_ITEM, cgs.media.wearOffSound );
 		}
 	}
 }
@@ -722,17 +798,14 @@ void CG_AddBufferedSound( sfxHandle_t sfx ) {
 
 	// clear all buffered sounds
 	if ( sfx == -1 ) {
-		cg.soundBufferIn = 0;
-		cg.soundBufferOut = 0;
-		memset( cg.soundBuffer, 0, sizeof( cg.soundBuffer ) );
+		ClearBufferedSoundsState();
 		return;
 	}
 
 	cg.soundBuffer[cg.soundBufferIn] = sfx;
-	cg.soundBufferIn = (cg.soundBufferIn + 1) % MAX_SOUNDBUFFER;
-	if (cg.soundBufferIn == cg.soundBufferOut) {
-		//cg.soundBufferOut++;
-		cg.soundBufferOut = (cg.soundBufferOut + 1) % MAX_SOUNDBUFFER;
+	cg.soundBufferIn = NextBufferedSoundIndex( cg.soundBufferIn );
+	if ( cg.soundBufferIn == cg.soundBufferOut ) {
+		cg.soundBufferOut = NextBufferedSoundIndex( cg.soundBufferOut );
 	}
 }
 
@@ -743,11 +816,10 @@ CG_PlayBufferedSounds
 */
 static void CG_PlayBufferedSounds( void ) {
 	if ( cg.soundTime < cg.time ) {
-		if (cg.soundBufferOut != cg.soundBufferIn && cg.soundBuffer[cg.soundBufferOut]) {
-			cg.soundPlaying = cg.soundBuffer[cg.soundBufferOut];
+		sfxHandle_t bufferedSound = 0;
+		if ( TryPopBufferedSound( bufferedSound ) ) {
+			cg.soundPlaying = bufferedSound;
 			trap_S_StartLocalSound( cg.soundPlaying, CHAN_ANNOUNCER );
-			cg.soundBuffer[cg.soundBufferOut] = 0;
-			cg.soundBufferOut = (cg.soundBufferOut + 1) % MAX_SOUNDBUFFER;
 			cg.soundTime = cg.time + 750;
 		} else {
 			cg.soundPlaying = 0;
@@ -768,16 +840,7 @@ Called once on first rendered frame
 static void CG_FirstFrame( void )
 {
 	CG_SetConfigValues();
-
-	cgs.voteTime = atoi( CG_ConfigString( CS_VOTE_TIME ) );
-	cgs.voteYes = atoi( CG_ConfigString( CS_VOTE_YES ) );
-	cgs.voteNo = atoi( CG_ConfigString( CS_VOTE_NO ) );
-	Q_strncpyz( cgs.voteString, CG_ConfigString( CS_VOTE_STRING ), sizeof( cgs.voteString ) );
-
-	if ( cgs.voteTime )
-		cgs.voteModified = qtrue;
-	else
-		cgs.voteModified = qfalse;
+	UpdateVoteStateFromConfig();
 }
 
 
@@ -838,9 +901,7 @@ void CG_DrawActiveFrame( int serverTime, stereoFrame_t stereoView, qboolean demo
 	// follow killer
 	if ( cg.followTime && cg.followTime < cg.time ) {
 		cg.followTime = 0;
-		if ( !cg.demoPlayback ) {
-			trap_SendConsoleCommand( va( "follow %i\n", cg.followClient ) );
-		}
+		SendFollowClientCommand();
 	}
 
 	// build cg.refdef
@@ -890,21 +951,7 @@ void CG_DrawActiveFrame( int serverTime, stereoFrame_t stereoView, qboolean demo
 		cg.oldTime = cg.time;
 		CG_AddLagometerFrameInfo();
 	}
-	if (cg_timescale.value != cg_timescaleFadeEnd.value) {
-		if (cg_timescale.value < cg_timescaleFadeEnd.value) {
-			cg_timescale.value += cg_timescaleFadeSpeed.value * ((float)cg.frametime) / 1000;
-			if (cg_timescale.value > cg_timescaleFadeEnd.value)
-				cg_timescale.value = cg_timescaleFadeEnd.value;
-		}
-		else {
-			cg_timescale.value -= cg_timescaleFadeSpeed.value * ((float)cg.frametime) / 1000;
-			if (cg_timescale.value < cg_timescaleFadeEnd.value)
-				cg_timescale.value = cg_timescaleFadeEnd.value;
-		}
-		if (cg_timescaleFadeSpeed.value) {
-			trap_Cvar_Set("timescale", va("%f", cg_timescale.value));
-		}
-	}
+	UpdateTimescaleFade();
 
 	// actually issue the rendering calls
 	CG_DrawActive( stereoView );

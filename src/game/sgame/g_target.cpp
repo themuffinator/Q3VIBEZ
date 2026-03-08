@@ -2,14 +2,83 @@
 //
 #include "g_local.h"
 
+#include <algorithm>
+#include <array>
+
+namespace {
+
+void ClearClientPowerups( gclient_t &client ) {
+	std::fill_n( client.ps.powerups, MAX_POWERUPS, 0 );
+}
+
+void SendCenterPrint( const int client_num, const char *message ) {
+	trap_SendServerCommand( client_num, va( "cp \"%s\"", message ) );
+}
+
+void SendTeamCenterPrint( const team_t team, const char *message ) {
+	G_TeamCommand( team, va( "cp \"%s\"", message ) );
+}
+
+void BroadcastCenterPrint( const char *message ) {
+	G_BroadcastServerCommand( -1, va( "cp \"%s\"", message ) );
+}
+
+void ToggleSpeakerLoopSound( gentity_t &entity ) {
+	entity.s.loopSound = entity.s.loopSound ? 0 : entity.noise_index;
+}
+
+void PlayTargetSpeakerEvent( gentity_t &entity, gentity_t *activator ) {
+	if ( entity.spawnflags & 8 && activator ) {
+		G_AddEvent( activator, EV_GENERAL_SOUND, entity.noise_index );
+		return;
+	}
+
+	if ( entity.spawnflags & 4 ) {
+		G_AddEvent( &entity, EV_GLOBAL_SOUND, entity.noise_index );
+		return;
+	}
+
+	G_AddEvent( &entity, EV_GENERAL_SOUND, entity.noise_index );
+}
+
+void BuildSpeakerPath( std::array<char, MAX_QPATH> &buffer, const char *sound_name ) {
+	if ( strstr( sound_name, ".wav" ) ) {
+		Q_strncpyz( buffer.data(), sound_name, buffer.size() );
+		return;
+	}
+
+	Com_sprintf( buffer.data(), buffer.size(), "%s.wav", sound_name );
+}
+
+bool RelayAllowsActivator( const gentity_t &entity, const gentity_t *activator ) {
+	if ( ( entity.spawnflags & 1 ) && activator && activator->client
+		&& activator->client->sess.sessionTeam != TEAM_RED ) {
+		return false;
+	}
+
+	if ( ( entity.spawnflags & 2 ) && activator && activator->client
+		&& activator->client->sess.sessionTeam != TEAM_BLUE ) {
+		return false;
+	}
+
+	return true;
+}
+
+void UseRandomRelayTarget( gentity_t *entity, gentity_t *activator ) {
+	if ( gentity_t *target = G_PickTarget( entity->target ); target && target->use ) {
+		target->use( target, entity, activator );
+	}
+}
+
+} // namespace
+
 //==========================================================
 
 /*QUAKED target_give (1 0 0) (-8 -8 -8) (8 8 8)
 Gives the activator all the items pointed to.
 */
 void Use_Target_Give( gentity_t *ent, gentity_t *other, gentity_t *activator ) {
-	gentity_t	*t;
-	trace_t		trace;
+	trace_t trace{};
 
 	if ( !activator->client ) {
 		return;
@@ -19,18 +88,16 @@ void Use_Target_Give( gentity_t *ent, gentity_t *other, gentity_t *activator ) {
 		return;
 	}
 
-	memset( &trace, 0, sizeof( trace ) );
-	t = NULL;
-	while ( (t = G_Find (t, FOFS(targetname), ent->target)) != NULL ) {
-		if ( !t->item ) {
+	for ( gentity_t *target = nullptr; ( target = G_Find( target, FOFS( targetname ), ent->target ) ) != nullptr; ) {
+		if ( !target->item ) {
 			continue;
 		}
-		Touch_Item( t, activator, &trace );
+		Touch_Item( target, activator, &trace );
 
 		// make sure it isn't going to respawn or show any events
-		t->tag = TAG_DONTSPAWN;
-		t->nextthink = 0;
-		trap_UnlinkEntity( t );
+		target->tag = TAG_DONTSPAWN;
+		target->nextthink = 0;
+		trap_UnlinkEntity( target );
 	}
 }
 
@@ -58,7 +125,7 @@ void Use_target_remove_powerups( gentity_t *ent, gentity_t *other, gentity_t *ac
 		Team_ReturnFlag( TEAM_FREE );
 	}
 
-	memset( activator->client->ps.powerups, 0, sizeof( activator->client->ps.powerups ) );
+	ClearClientPowerups( *activator->client );
 }
 
 void SP_target_remove_powerups( gentity_t *ent ) {
@@ -124,21 +191,21 @@ If "private", only the activator gets the message.  If no checks, all clients ge
 */
 void Use_Target_Print (gentity_t *ent, gentity_t *other, gentity_t *activator) {
 	if ( activator && activator->client && ( ent->spawnflags & 4 ) ) {
-		trap_SendServerCommand( activator-g_entities, va("cp \"%s\"", ent->message ));
+		SendCenterPrint( activator - g_entities, ent->message );
 		return;
 	}
 
 	if ( ent->spawnflags & 3 ) {
 		if ( ent->spawnflags & 1 ) {
-			G_TeamCommand( TEAM_RED, va("cp \"%s\"", ent->message) );
+			SendTeamCenterPrint( TEAM_RED, ent->message );
 		}
 		if ( ent->spawnflags & 2 ) {
-			G_TeamCommand( TEAM_BLUE, va("cp \"%s\"", ent->message) );
+			SendTeamCenterPrint( TEAM_BLUE, ent->message );
 		}
 		return;
 	}
 
-	G_BroadcastServerCommand( -1, va("cp \"%s\"", ent->message ));
+	BroadcastCenterPrint( ent->message );
 }
 
 void SP_target_print( gentity_t *ent ) {
@@ -162,24 +229,15 @@ Multiple identical looping sounds will just increase volume without any speed co
 "random"	wait variance, default is 0
 */
 void Use_Target_Speaker (gentity_t *ent, gentity_t *other, gentity_t *activator) {
-	if (ent->spawnflags & 3) {	// looping sound toggles
-		if (ent->s.loopSound)
-			ent->s.loopSound = 0;	// turn it off
-		else
-			ent->s.loopSound = ent->noise_index;	// start it
-	}else {	// normal sound
-		if ( ent->spawnflags & 8 && activator ) {
-			G_AddEvent( activator, EV_GENERAL_SOUND, ent->noise_index );
-		} else if (ent->spawnflags & 4) {
-			G_AddEvent( ent, EV_GLOBAL_SOUND, ent->noise_index );
-		} else {
-			G_AddEvent( ent, EV_GENERAL_SOUND, ent->noise_index );
-		}
+	if ( ent->spawnflags & 3 ) {	// looping sound toggles
+		ToggleSpeakerLoopSound( *ent );
+	} else {	// normal sound
+		PlayTargetSpeakerEvent( *ent, activator );
 	}
 }
 
 void SP_target_speaker( gentity_t *ent ) {
-	char	buffer[MAX_QPATH];
+	std::array<char, MAX_QPATH> buffer{};
 	char	*s;
 
 	G_SpawnFloat( "wait", "0", &ent->wait );
@@ -195,12 +253,8 @@ void SP_target_speaker( gentity_t *ent ) {
 		ent->spawnflags |= 8;
 	}
 
-	if (!strstr( s, ".wav" )) {
-		Com_sprintf (buffer, sizeof(buffer), "%s.wav", s );
-	} else {
-		Q_strncpyz( buffer, s, sizeof(buffer) );
-	}
-	ent->noise_index = G_SoundIndex(buffer);
+	BuildSpeakerPath( buffer, s );
+	ent->noise_index = G_SoundIndex( buffer.data() );
 
 	// a repeating speaker can be done completely client side
 	ent->s.eType = ET_SPEAKER;
@@ -210,10 +264,11 @@ void SP_target_speaker( gentity_t *ent ) {
 
 
 	// check for prestarted looping sound
-	if ( ent->spawnflags & 1 )
+	if ( ent->spawnflags & 1 ) {
 		ent->s.loopSound = ent->noise_index;
-	else
+	} else {
 		ent->s.loopSound = 0;
+	}
 
 	ent->use = Use_Target_Speaker;
 
@@ -289,16 +344,14 @@ void target_laser_use (gentity_t *self, gentity_t *other, gentity_t *activator)
 
 void target_laser_start (gentity_t *self)
 {
-	gentity_t *ent;
-
 	self->s.eType = ET_BEAM;
 
 	if (self->target) {
-		ent = G_Find (NULL, FOFS(targetname), self->target);
-		if (!ent) {
+		gentity_t *target = G_Find( nullptr, FOFS( targetname ), self->target );
+		if ( !target ) {
 			G_Printf ("%s at %s: %s is a bad target\n", self->classname, vtos(self->s.origin), self->target);
 		}
-		self->enemy = ent;
+		self->enemy = target;
 	} else {
 		G_SetMovedir (self->s.angles, self->movedir);
 	}
@@ -359,24 +412,15 @@ The activator can be forced to be from a certain team.
 if RANDOM is checked, only one of the targets will be fired, not all of them
 */
 void target_relay_use (gentity_t *self, gentity_t *other, gentity_t *activator) {
+	if ( !RelayAllowsActivator( *self, activator ) ) {
+		return;
+	}
 
-	if ( ( self->spawnflags & 1 ) && activator && activator->client 
-		&& activator->client->sess.sessionTeam != TEAM_RED ) {
-		return;
-	}
-	if ( ( self->spawnflags & 2 ) && activator && activator->client 
-		&& activator->client->sess.sessionTeam != TEAM_BLUE ) {
-		return;
-	}
 	if ( self->spawnflags & 4 ) {
-		gentity_t	*ent;
-
-		ent = G_PickTarget( self->target );
-		if ( ent && ent->use ) {
-			ent->use( ent, self, activator );
-		}
+		UseRandomRelayTarget( self, activator );
 		return;
 	}
+
 	G_UseTargets (self, activator);
 }
 
@@ -451,4 +495,3 @@ void SP_target_location( gentity_t *self ){
 
 	G_SetOrigin( self, self->s.origin );
 }
-

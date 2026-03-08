@@ -16,9 +16,7 @@ DLLEXPORT void dllEntry( dllSyscall_t syscallptr ) {
 
 
 int PASSFLOAT( float x ) {
-	float	floatTemp;
-	floatTemp = x;
-	return *(int *)&floatTemp;
+	return Q_FloatAsInt( x );
 }
 
 void	trap_Print( const char *text ) {

@@ -74,6 +74,12 @@ typedef struct {
 	entityShared_t	r;				// shared by both the server system and game
 } sharedEntity_t;
 
+#ifdef __cplusplus
+static_assert( offsetof( entityShared_t, linked ) == sizeof( entityState_t ), "entityShared_t ABI changed" );
+static_assert( offsetof( sharedEntity_t, s ) == 0, "sharedEntity_t::s must remain first" );
+static_assert( offsetof( sharedEntity_t, r ) == sizeof( entityState_t ), "sharedEntity_t::r ABI changed" );
+#endif
+
 
 
 //===============================================================
@@ -405,3 +411,7 @@ typedef enum {
 	BOTAI_START_FRAME				// ( int time );
 } gameExport_t;
 
+#ifdef __cplusplus
+static_assert( sizeof( gameImport_t ) == sizeof( int ), "gameImport_t must remain int-sized" );
+static_assert( sizeof( gameExport_t ) == sizeof( int ), "gameExport_t must remain int-sized" );
+#endif

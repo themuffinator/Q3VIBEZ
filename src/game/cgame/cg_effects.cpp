@@ -3,7 +3,85 @@
 // cg_effects.c -- these functions generate localentities, usually as a result
 // of event processing
 
+#include <array>
+
 #include "cg_local.h"
+
+namespace {
+
+void SetRefEntityShaderTime( refEntity_t &ref_entity, int shader_time_ms ) {
+	if ( intShaderTime ) {
+		ref_entity.u.intShaderTime = shader_time_ms;
+	} else {
+		ref_entity.u.shaderTime = shader_time_ms / 1000.0f;
+	}
+}
+
+void InitializeTimedLocalEntity( localEntity_t &entity, leType_t type, int start_time, int end_time, int le_flags = 0 ) {
+	entity.leFlags = le_flags;
+	entity.leType = type;
+	entity.startTime = start_time;
+	entity.endTime = end_time;
+	entity.lifeRate = 1.0 / ( entity.endTime - entity.startTime );
+}
+
+void SetLocalEntityColor( localEntity_t &entity, float red, float green, float blue, float alpha ) {
+	entity.color[0] = red;
+	entity.color[1] = green;
+	entity.color[2] = blue;
+	entity.color[3] = alpha;
+}
+
+void SetLocalEntityColorWhite( localEntity_t &entity ) {
+	SetLocalEntityColor( entity, 1.0f, 1.0f, 1.0f, 1.0f );
+}
+
+void InitializeFragmentLocalEntity(
+	localEntity_t &entity,
+	const vec3_t origin,
+	const vec3_t velocity,
+	qhandle_t model,
+	int lifetime,
+	float bounce_factor,
+	leBounceSoundType_t bounce_sound_type,
+	leMarkType_t mark_type ) {
+	refEntity_t &ref_entity = entity.refEntity;
+
+	InitializeTimedLocalEntity( entity, LE_FRAGMENT, cg.time, cg.time + lifetime );
+
+	VectorCopy( origin, ref_entity.origin );
+	AxisCopy( axisDefault, ref_entity.axis );
+	ref_entity.hModel = model;
+
+	entity.pos.trType = TR_GRAVITY;
+	VectorCopy( origin, entity.pos.trBase );
+	VectorCopy( velocity, entity.pos.trDelta );
+	entity.pos.trTime = cg.time;
+
+	entity.bounceFactor = bounce_factor;
+	entity.leBounceSoundType = bounce_sound_type;
+	entity.leMarkType = mark_type;
+}
+
+void SetRandomLaunchVelocity( vec3_t velocity, float horizontal_speed, float vertical_base ) {
+	velocity[0] = crandom() * horizontal_speed;
+	velocity[1] = crandom() * horizontal_speed;
+	velocity[2] = vertical_base + crandom() * horizontal_speed;
+}
+
+void LaunchFragmentModel(
+	const vec3_t origin,
+	const vec3_t velocity,
+	qhandle_t model,
+	int lifetime,
+	float bounce_factor,
+	leBounceSoundType_t bounce_sound_type,
+	leMarkType_t mark_type ) {
+	localEntity_t *entity = CG_AllocLocalEntity();
+	InitializeFragmentLocalEntity( *entity, origin, velocity, model, lifetime, bounce_factor, bounce_sound_type, mark_type );
+}
+
+} // namespace
 
 
 /*
@@ -38,17 +116,10 @@ void CG_BubbleTrail( const vec3_t start, const vec3_t end, float spacing ) {
 		refEntity_t		*re;
 
 		le = CG_AllocLocalEntity();
-		le->leFlags = LEF_PUFF_DONT_SCALE;
-		le->leType = LE_MOVE_SCALE_FADE;
-		le->startTime = cg.time;
-		le->endTime = cg.time + 1000 + random() * 250;
-		le->lifeRate = 1.0 / ( le->endTime - le->startTime );
+		InitializeTimedLocalEntity( *le, LE_MOVE_SCALE_FADE, cg.time, cg.time + 1000 + random() * 250, LEF_PUFF_DONT_SCALE );
 
 		re = &le->refEntity;
-		if ( intShaderTime )
-			re->u.intShaderTime = cg.time;
-		else
-			re->u.shaderTime = cg.time / 1000.0f;
+		SetRefEntityShaderTime( *re, cg.time );
 
 		re->reType = RT_SPRITE;
 		re->rotation = 0;
@@ -59,7 +130,7 @@ void CG_BubbleTrail( const vec3_t start, const vec3_t end, float spacing ) {
 		re->shaderRGBA[2] = 0xff;
 		re->shaderRGBA[3] = 0xff;
 
-		le->color[3] = 1.0;
+		le->color[3] = 1.0f;
 
 		le->pos.trType = TR_LINEAR;
 		le->pos.trTime = cg.time;
@@ -93,32 +164,23 @@ localEntity_t *CG_SmokePuff( const vec3_t p, const vec3_t vel,
 //	int fadeInTime = startTime + duration / 2;
 
 	le = CG_AllocLocalEntity();
-	le->leFlags = leFlags;
+	InitializeTimedLocalEntity( *le, LE_MOVE_SCALE_FADE, startTime, startTime + duration, leFlags );
 	le->radius = radius;
 
 	re = &le->refEntity;
 	re->rotation = Q_random( &seed ) * 360;
 	re->radius = radius;
 
-	if ( intShaderTime )
-		re->u.intShaderTime = startTime;
-	else
-		re->u.shaderTime = startTime / 1000.0f;
+	SetRefEntityShaderTime( *re, startTime );
 
-	le->leType = LE_MOVE_SCALE_FADE;
-	le->startTime = startTime;
 	le->fadeInTime = fadeInTime;
-	le->endTime = startTime + duration;
 	if ( fadeInTime > startTime ) {
 		le->lifeRate = 1.0 / ( le->endTime - le->fadeInTime );
 	}
 	else {
 		le->lifeRate = 1.0 / ( le->endTime - le->startTime );
 	}
-	le->color[0] = r;
-	le->color[1] = g; 
-	le->color[2] = b;
-	le->color[3] = a;
+	SetLocalEntityColor( *le, r, g, b, a );
 
 
 	le->pos.trType = TR_LINEAR;
@@ -161,22 +223,14 @@ void CG_SpawnEffect( const vec3_t origin ) {
 	refEntity_t		*re;
 
 	le = CG_AllocLocalEntity();
-	le->leFlags = 0;
-	le->leType = LE_FADE_RGB;
-	le->startTime = cg.time;
-	le->endTime = cg.time + 500;
-	le->lifeRate = 1.0 / ( le->endTime - le->startTime );
-
-	le->color[0] = le->color[1] = le->color[2] = le->color[3] = 1.0;
+	InitializeTimedLocalEntity( *le, LE_FADE_RGB, cg.time, cg.time + 500 );
+	SetLocalEntityColorWhite( *le );
 
 	re = &le->refEntity;
 
 	re->reType = RT_MODEL;
 
-	if ( intShaderTime )
-		re->u.intShaderTime = cg.time;
-	else
-		re->u.shaderTime = cg.time / 1000.0f;
+	SetRefEntityShaderTime( *re, cg.time );
 
 #ifndef MISSIONPACK
 	re->customShader = cgs.media.teleportEffectShader;
@@ -401,14 +455,10 @@ void CG_ScorePlum( int client, const vec3_t origin, int score ) {
 	}
 
 	le = CG_AllocLocalEntity();
-	le->leFlags = 0;
-	le->leType = LE_SCOREPLUM;
-	le->startTime = cg.time;
-	le->endTime = cg.time + 4000;
-	le->lifeRate = 1.0 / ( le->endTime - le->startTime );
+	InitializeTimedLocalEntity( *le, LE_SCOREPLUM, cg.time, cg.time + 4000 );
 
 	
-	le->color[0] = le->color[1] = le->color[2] = le->color[3] = 1.0;
+	SetLocalEntityColorWhite( *le );
 	le->radius = score;
 	
 	VectorCopy( origin, le->pos.trBase );
@@ -475,10 +525,7 @@ localEntity_t *CG_MakeExplosion( const vec3_t origin, const vec3_t dir,
 	ex->endTime = ex->startTime + msec;
 
 	// bias the time so all shader effects start correctly
-	if ( intShaderTime )
-		ex->refEntity.u.intShaderTime = ex->startTime;
-	else
-		ex->refEntity.u.shaderTime = ex->startTime / 1000.0f;
+	SetRefEntityShaderTime( ex->refEntity, ex->startTime );
 
 	ex->refEntity.hModel = hModel;
 	ex->refEntity.customShader = shader;
@@ -487,7 +534,7 @@ localEntity_t *CG_MakeExplosion( const vec3_t origin, const vec3_t dir,
 	VectorCopy( newOrigin, ex->refEntity.origin );
 	VectorCopy( newOrigin, ex->refEntity.oldorigin );
 
-	ex->color[0] = ex->color[1] = ex->color[2] = 1.0;
+	ex->color[0] = ex->color[1] = ex->color[2] = 1.0f;
 
 	return ex;
 }
@@ -534,29 +581,7 @@ CG_LaunchGib
 ==================
 */
 static void CG_LaunchGib( const vec3_t origin, const vec3_t velocity, qhandle_t hModel ) {
-	localEntity_t	*le;
-	refEntity_t		*re;
-
-	le = CG_AllocLocalEntity();
-	re = &le->refEntity;
-
-	le->leType = LE_FRAGMENT;
-	le->startTime = cg.time;
-	le->endTime = le->startTime + 5000 + random() * 3000;
-
-	VectorCopy( origin, re->origin );
-	AxisCopy( axisDefault, re->axis );
-	re->hModel = hModel;
-
-	le->pos.trType = TR_GRAVITY;
-	VectorCopy( origin, le->pos.trBase );
-	VectorCopy( velocity, le->pos.trDelta );
-	le->pos.trTime = cg.time;
-
-	le->bounceFactor = 0.6f;
-
-	le->leBounceSoundType = LEBS_BLOOD;
-	le->leMarkType = LEMT_BLOOD;
+	LaunchFragmentModel( origin, velocity, hModel, 5000 + random() * 3000, 0.6f, LEBS_BLOOD, LEMT_BLOOD );
 }
 
 /*
@@ -570,15 +595,24 @@ Generated a bunch of gibs launching out from the bodies location
 #define	GIB_JUMP		250
 void CG_GibPlayer( const vec3_t playerOrigin ) {
 	vec3_t	origin, velocity;
+	const auto gib_models = std::to_array<qhandle_t>( {
+		cgs.media.gibAbdomen,
+		cgs.media.gibArm,
+		cgs.media.gibChest,
+		cgs.media.gibFist,
+		cgs.media.gibFoot,
+		cgs.media.gibForearm,
+		cgs.media.gibIntestine,
+		cgs.media.gibLeg,
+		cgs.media.gibLeg,
+	} );
 
 	if ( !cg_blood.integer ) {
 		return;
 	}
 
 	VectorCopy( playerOrigin, origin );
-	velocity[0] = crandom()*GIB_VELOCITY;
-	velocity[1] = crandom()*GIB_VELOCITY;
-	velocity[2] = GIB_JUMP + crandom()*GIB_VELOCITY;
+	SetRandomLaunchVelocity( velocity, GIB_VELOCITY, GIB_JUMP );
 	if ( rand() & 1 ) {
 		CG_LaunchGib( origin, velocity, cgs.media.gibSkull );
 	} else {
@@ -590,59 +624,11 @@ void CG_GibPlayer( const vec3_t playerOrigin ) {
 		return;
 	}
 
-	VectorCopy( playerOrigin, origin );
-	velocity[0] = crandom()*GIB_VELOCITY;
-	velocity[1] = crandom()*GIB_VELOCITY;
-	velocity[2] = GIB_JUMP + crandom()*GIB_VELOCITY;
-	CG_LaunchGib( origin, velocity, cgs.media.gibAbdomen );
-
-	VectorCopy( playerOrigin, origin );
-	velocity[0] = crandom()*GIB_VELOCITY;
-	velocity[1] = crandom()*GIB_VELOCITY;
-	velocity[2] = GIB_JUMP + crandom()*GIB_VELOCITY;
-	CG_LaunchGib( origin, velocity, cgs.media.gibArm );
-
-	VectorCopy( playerOrigin, origin );
-	velocity[0] = crandom()*GIB_VELOCITY;
-	velocity[1] = crandom()*GIB_VELOCITY;
-	velocity[2] = GIB_JUMP + crandom()*GIB_VELOCITY;
-	CG_LaunchGib( origin, velocity, cgs.media.gibChest );
-
-	VectorCopy( playerOrigin, origin );
-	velocity[0] = crandom()*GIB_VELOCITY;
-	velocity[1] = crandom()*GIB_VELOCITY;
-	velocity[2] = GIB_JUMP + crandom()*GIB_VELOCITY;
-	CG_LaunchGib( origin, velocity, cgs.media.gibFist );
-
-	VectorCopy( playerOrigin, origin );
-	velocity[0] = crandom()*GIB_VELOCITY;
-	velocity[1] = crandom()*GIB_VELOCITY;
-	velocity[2] = GIB_JUMP + crandom()*GIB_VELOCITY;
-	CG_LaunchGib( origin, velocity, cgs.media.gibFoot );
-
-	VectorCopy( playerOrigin, origin );
-	velocity[0] = crandom()*GIB_VELOCITY;
-	velocity[1] = crandom()*GIB_VELOCITY;
-	velocity[2] = GIB_JUMP + crandom()*GIB_VELOCITY;
-	CG_LaunchGib( origin, velocity, cgs.media.gibForearm );
-
-	VectorCopy( playerOrigin, origin );
-	velocity[0] = crandom()*GIB_VELOCITY;
-	velocity[1] = crandom()*GIB_VELOCITY;
-	velocity[2] = GIB_JUMP + crandom()*GIB_VELOCITY;
-	CG_LaunchGib( origin, velocity, cgs.media.gibIntestine );
-
-	VectorCopy( playerOrigin, origin );
-	velocity[0] = crandom()*GIB_VELOCITY;
-	velocity[1] = crandom()*GIB_VELOCITY;
-	velocity[2] = GIB_JUMP + crandom()*GIB_VELOCITY;
-	CG_LaunchGib( origin, velocity, cgs.media.gibLeg );
-
-	VectorCopy( playerOrigin, origin );
-	velocity[0] = crandom()*GIB_VELOCITY;
-	velocity[1] = crandom()*GIB_VELOCITY;
-	velocity[2] = GIB_JUMP + crandom()*GIB_VELOCITY;
-	CG_LaunchGib( origin, velocity, cgs.media.gibLeg );
+	for ( const qhandle_t model : gib_models ) {
+		VectorCopy( playerOrigin, origin );
+		SetRandomLaunchVelocity( velocity, GIB_VELOCITY, GIB_JUMP );
+		CG_LaunchGib( origin, velocity, model );
+	}
 }
 
 /*
@@ -651,29 +637,7 @@ CG_LaunchExplode
 ==================
 */
 void CG_LaunchExplode( vec3_t origin, vec3_t velocity, qhandle_t hModel ) {
-	localEntity_t	*le;
-	refEntity_t		*re;
-
-	le = CG_AllocLocalEntity();
-	re = &le->refEntity;
-
-	le->leType = LE_FRAGMENT;
-	le->startTime = cg.time;
-	le->endTime = le->startTime + 10000 + random() * 6000;
-
-	VectorCopy( origin, re->origin );
-	AxisCopy( axisDefault, re->axis );
-	re->hModel = hModel;
-
-	le->pos.trType = TR_GRAVITY;
-	VectorCopy( origin, le->pos.trBase );
-	VectorCopy( velocity, le->pos.trDelta );
-	le->pos.trTime = cg.time;
-
-	le->bounceFactor = 0.1f;
-
-	le->leBounceSoundType = LEBS_BRASS;
-	le->leMarkType = LEMT_NONE;
+	LaunchFragmentModel( origin, velocity, hModel, 10000 + random() * 6000, 0.1f, LEBS_BRASS, LEMT_NONE );
 }
 
 #define	EXP_VELOCITY	100
@@ -687,39 +651,15 @@ Generated a bunch of gibs launching out from the bodies location
 */
 void CG_BigExplode( vec3_t playerOrigin ) {
 	vec3_t	origin, velocity;
+	const auto velocity_scales = std::to_array<float>( { 1.0f, 1.0f, 1.5f, 2.0f, 2.5f } );
 
 	if ( !cg_blood.integer ) {
 		return;
 	}
 
-	VectorCopy( playerOrigin, origin );
-	velocity[0] = crandom()*EXP_VELOCITY;
-	velocity[1] = crandom()*EXP_VELOCITY;
-	velocity[2] = EXP_JUMP + crandom()*EXP_VELOCITY;
-	CG_LaunchExplode( origin, velocity, cgs.media.smoke2 );
-
-	VectorCopy( playerOrigin, origin );
-	velocity[0] = crandom()*EXP_VELOCITY;
-	velocity[1] = crandom()*EXP_VELOCITY;
-	velocity[2] = EXP_JUMP + crandom()*EXP_VELOCITY;
-	CG_LaunchExplode( origin, velocity, cgs.media.smoke2 );
-
-	VectorCopy( playerOrigin, origin );
-	velocity[0] = crandom()*EXP_VELOCITY*1.5;
-	velocity[1] = crandom()*EXP_VELOCITY*1.5;
-	velocity[2] = EXP_JUMP + crandom()*EXP_VELOCITY;
-	CG_LaunchExplode( origin, velocity, cgs.media.smoke2 );
-
-	VectorCopy( playerOrigin, origin );
-	velocity[0] = crandom()*EXP_VELOCITY*2.0;
-	velocity[1] = crandom()*EXP_VELOCITY*2.0;
-	velocity[2] = EXP_JUMP + crandom()*EXP_VELOCITY;
-	CG_LaunchExplode( origin, velocity, cgs.media.smoke2 );
-
-	VectorCopy( playerOrigin, origin );
-	velocity[0] = crandom()*EXP_VELOCITY*2.5;
-	velocity[1] = crandom()*EXP_VELOCITY*2.5;
-	velocity[2] = EXP_JUMP + crandom()*EXP_VELOCITY;
-	CG_LaunchExplode( origin, velocity, cgs.media.smoke2 );
+	for ( const float velocity_scale : velocity_scales ) {
+		VectorCopy( playerOrigin, origin );
+		SetRandomLaunchVelocity( velocity, EXP_VELOCITY * velocity_scale, EXP_JUMP );
+		CG_LaunchExplode( origin, velocity, cgs.media.smoke2 );
+	}
 }
-

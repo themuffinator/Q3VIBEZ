@@ -2,6 +2,10 @@
 //
 // cg_marks.c -- wall marks
 
+#include <algorithm>
+#include <array>
+#include <span>
+
 #include "cg_local.h"
 
 /*
@@ -18,6 +22,46 @@ markPoly_t	*cg_freeMarkPolys;			// single linked list
 markPoly_t	cg_markPolys[MAX_MARK_POLYS];
 static		int	markTotal;
 
+namespace {
+
+std::span<markPoly_t> MarkPolyStorage() {
+	return { cg_markPolys, MAX_MARK_POLYS };
+}
+
+void InitializeMarkPolyPool() {
+	for ( auto &mark : MarkPolyStorage() ) {
+		mark = {};
+	}
+
+	cg_activeMarkPolys = {};
+	cg_activeMarkPolys.nextMark = &cg_activeMarkPolys;
+	cg_activeMarkPolys.prevMark = &cg_activeMarkPolys;
+
+	cg_freeMarkPolys = cg_markPolys;
+	for ( std::size_t i = 0; i + 1 < MarkPolyStorage().size(); ++i ) {
+		cg_markPolys[i].nextMark = &cg_markPolys[i + 1];
+	}
+	cg_markPolys[MarkPolyStorage().size() - 1].nextMark = nullptr;
+	markTotal = 0;
+}
+
+void ResetMarkPoly( markPoly_t &mark ) {
+	mark = {};
+}
+
+void LinkActiveMarkPoly( markPoly_t &mark ) {
+	mark.nextMark = cg_activeMarkPolys.nextMark;
+	mark.prevMark = &cg_activeMarkPolys;
+	cg_activeMarkPolys.nextMark->prevMark = &mark;
+	cg_activeMarkPolys.nextMark = &mark;
+}
+
+void SetPolyVertModulate( polyVert_t &vert, const byte ( &colors )[4] ) {
+	std::copy_n( colors, 4, vert.modulate );
+}
+
+} // namespace
+
 /*
 ===================
 CG_InitMarkPolys
@@ -26,16 +70,7 @@ This is called at startup and for tournement restarts
 ===================
 */
 void	CG_InitMarkPolys( void ) {
-	int		i;
-
-	memset( cg_markPolys, 0, sizeof(cg_markPolys) );
-
-	cg_activeMarkPolys.nextMark = &cg_activeMarkPolys;
-	cg_activeMarkPolys.prevMark = &cg_activeMarkPolys;
-	cg_freeMarkPolys = cg_markPolys;
-	for ( i = 0 ; i < MAX_MARK_POLYS - 1 ; i++ ) {
-		cg_markPolys[i].nextMark = &cg_markPolys[i+1];
-	}
+	InitializeMarkPolyPool();
 }
 
 
@@ -73,7 +108,7 @@ markPoly_t	*CG_AllocMark( void ) {
 		// no free entities, so free the one at the end of the chain
 		// remove the oldest active entity
 		time = cg_activeMarkPolys.prevMark->time;
-		while (cg_activeMarkPolys.prevMark && time == cg_activeMarkPolys.prevMark->time) {
+		while ( cg_activeMarkPolys.prevMark != &cg_activeMarkPolys && time == cg_activeMarkPolys.prevMark->time ) {
 			CG_FreeMarkPoly( cg_activeMarkPolys.prevMark );
 		}
 	}
@@ -81,13 +116,10 @@ markPoly_t	*CG_AllocMark( void ) {
 	le = cg_freeMarkPolys;
 	cg_freeMarkPolys = cg_freeMarkPolys->nextMark;
 
-	memset( le, 0, sizeof( *le ) );
+	ResetMarkPoly( *le );
 
 	// link into the active list
-	le->nextMark = cg_activeMarkPolys.nextMark;
-	le->prevMark = &cg_activeMarkPolys;
-	cg_activeMarkPolys.nextMark->prevMark = le;
-	cg_activeMarkPolys.nextMark = le;
+	LinkActiveMarkPoly( *le );
 	return le;
 }
 
@@ -177,7 +209,7 @@ void CG_ImpactMark( qhandle_t markShader, const vec3_t origin, const vec3_t dir,
 			VectorSubtract( v->xyz, origin, delta );
 			v->st[0] = 0.5 + DotProduct( delta, axis[1] ) * texCoordScale;
 			v->st[1] = 0.5 + DotProduct( delta, axis[2] ) * texCoordScale;
-			*(int *)v->modulate = *(int *)colors;
+			SetPolyVertModulate( *v, colors );
 		}
 
 		// if it is a temporary (shadow) mark, add it immediately and forget about it
@@ -196,7 +228,7 @@ void CG_ImpactMark( qhandle_t markShader, const vec3_t origin, const vec3_t dir,
 		mark->color[1] = green;
 		mark->color[2] = blue;
 		mark->color[3] = alpha;
-		memcpy( mark->verts, verts, mf->numPoints * sizeof( verts[0] ) );
+		std::copy_n( verts, mf->numPoints, mark->verts );
 		markTotal++;
 	}
 }
@@ -341,15 +373,14 @@ typedef enum
 #define	MAX_SHADER_ANIMS		32
 #define	MAX_SHADER_ANIM_FRAMES	64
 
-static char *shaderAnimNames[MAX_SHADER_ANIMS] = {
-	"explode1",
-	NULL
+static constexpr std::array<const char *, MAX_SHADER_ANIMS> shaderAnimNames = {
+	"explode1"
 };
 static qhandle_t shaderAnims[MAX_SHADER_ANIMS][MAX_SHADER_ANIM_FRAMES];
-static int	shaderAnimCounts[MAX_SHADER_ANIMS] = {
+static constexpr std::array<int, MAX_SHADER_ANIMS> shaderAnimCounts = {
 	23
 };
-static float	shaderAnimSTRatio[MAX_SHADER_ANIMS] = {
+static constexpr std::array<float, MAX_SHADER_ANIMS> shaderAnimSTRatio = {
 	1.0f
 };
 static int	numShaderAnims;
@@ -368,6 +399,101 @@ vec3_t		rforward, rright, rup;
 
 int			oldtime;
 
+namespace {
+
+std::span<cparticle_t> ParticlePoolStorage() {
+	return { particles, static_cast<std::size_t>( cl_numparticles ) };
+}
+
+void RecycleParticle( cparticle_t &particle ) {
+	particle.next = free_particles;
+	free_particles = &particle;
+	particle.type = 0;
+	particle.color = 0;
+	particle.alpha = 0;
+}
+
+cparticle_t *AllocateParticle() {
+	if ( free_particles == nullptr ) {
+		return nullptr;
+	}
+
+	cparticle_t *particle = free_particles;
+	free_particles = particle->next;
+	particle->next = active_particles;
+	active_particles = particle;
+	return particle;
+}
+
+void AppendActiveParticle( cparticle_t *&active, cparticle_t *&tail, cparticle_t &particle ) {
+	particle.next = nullptr;
+	if ( tail == nullptr ) {
+		active = tail = &particle;
+		return;
+	}
+
+	tail->next = &particle;
+	tail = &particle;
+}
+
+bool UsesParticleEndTimeLifecycle( const cparticle_t &particle ) {
+	switch ( particle.type ) {
+	case P_SMOKE:
+	case P_ANIM:
+	case P_BLEED:
+	case P_SMOKE_IMPACT:
+	case P_WEATHER_FLURRY:
+	case P_FLAT_SCALEUP_FADE:
+		return true;
+	default:
+		return false;
+	}
+}
+
+bool IsExpiredParticle( const cparticle_t &particle ) {
+	return UsesParticleEndTimeLifecycle( particle ) && cg.time > particle.endtime;
+}
+
+bool IsOneFrameSprite( const cparticle_t &particle ) {
+	return ( particle.type == P_BAT || particle.type == P_SPRITE ) && particle.endtime < 0;
+}
+
+void InitializeParticlePool() {
+	for ( auto &particle : ParticlePoolStorage() ) {
+		particle = {};
+	}
+
+	auto storage = ParticlePoolStorage();
+	if ( storage.empty() ) {
+		free_particles = nullptr;
+		active_particles = nullptr;
+		return;
+	}
+
+	free_particles = storage.data();
+	active_particles = nullptr;
+
+	for ( std::size_t i = 0; i + 1 < storage.size(); ++i ) {
+		storage[i].next = &storage[i + 1];
+		storage[i].type = 0;
+	}
+	storage.back().next = nullptr;
+	storage.back().type = 0;
+}
+
+void RegisterParticleShaderAnimations() {
+	int shader_anim_count = 0;
+	for ( ; shader_anim_count < static_cast<int>( shaderAnimNames.size() ) && shaderAnimNames[shader_anim_count] != nullptr; ++shader_anim_count ) {
+		for ( int frame = 0; frame < shaderAnimCounts[shader_anim_count]; ++frame ) {
+			shaderAnims[shader_anim_count][frame] = trap_R_RegisterShader( va( "%s%i", shaderAnimNames[shader_anim_count], frame + 1 ) );
+		}
+	}
+
+	numShaderAnims = shader_anim_count;
+}
+
+} // namespace
+
 /*
 ===============
 CL_ClearParticles
@@ -375,31 +501,12 @@ CL_ClearParticles
 */
 void CG_ClearParticles (void)
 {
-	int		i;
-
-	memset( particles, 0, sizeof(particles) );
-
-	free_particles = &particles[0];
-	active_particles = NULL;
-
-	for (i=0 ;i<cl_numparticles ; i++)
-	{
-		particles[i].next = &particles[i+1];
-		particles[i].type = 0;
-	}
-	particles[cl_numparticles-1].next = NULL;
+	InitializeParticlePool();
 
 	oldtime = cg.time;
 
 	// Ridah, init the shaderAnims
-	for (i=0; shaderAnimNames[i]; i++) {
-		int j;
-
-		for (j=0; j<shaderAnimCounts[i]; j++) {
-			shaderAnims[i][j] = trap_R_RegisterShader( va("%s%i", shaderAnimNames[i], j+1) );
-		}
-	}
-	numShaderAnims = i;
+	RegisterParticleShaderAnimations();
 	// done.
 
 	initparticles = qtrue;
@@ -1068,9 +1175,7 @@ void CG_AddParticles (void)
 	float			alpha;
 	float			time, time2;
 	vec3_t			org;
-	//int				color;
 	cparticle_t		*active, *tail;
-	//int				type;
 	vec3_t			rotate_ang;
 
 	if (!initparticles)
@@ -1087,8 +1192,8 @@ void CG_AddParticles (void)
 	
 	oldtime = cg.time;
 
-	active = NULL;
-	tail = NULL;
+	active = nullptr;
+	tail = nullptr;
 
 	for (p=active_particles ; p ; p=next)
 	{
@@ -1098,92 +1203,33 @@ void CG_AddParticles (void)
 		time = (cg.time - p->time)*0.001;
 
 		alpha = p->alpha + time*p->alphavel;
-		if (alpha <= 0)
-		{	// faded out
-			p->next = free_particles;
-			free_particles = p;
-			p->type = 0;
-			p->color = 0;
-			p->alpha = 0;
+		if (alpha <= 0) {	// faded out
+			RecycleParticle( *p );
 			continue;
 		}
 
-		if (p->type == P_SMOKE || p->type == P_ANIM || p->type == P_BLEED || p->type == P_SMOKE_IMPACT)
-		{
-			if (cg.time > p->endtime)
-			{
-				p->next = free_particles;
-				free_particles = p;
-				p->type = 0;
-				p->color = 0;
-				p->alpha = 0;
-			
-				continue;
-			}
-
+		if ( IsExpiredParticle( *p ) ) {
+			RecycleParticle( *p );
+			continue;
 		}
 
-		if (p->type == P_WEATHER_FLURRY)
-		{
-			if (cg.time > p->endtime)
-			{
-				p->next = free_particles;
-				free_particles = p;
-				p->type = 0;
-				p->color = 0;
-				p->alpha = 0;
-			
-				continue;
-			}
-		}
-
-
-		if (p->type == P_FLAT_SCALEUP_FADE)
-		{
-			if (cg.time > p->endtime)
-			{
-				p->next = free_particles;
-				free_particles = p;
-				p->type = 0;
-				p->color = 0;
-				p->alpha = 0;
-				continue;
-			}
-
-		}
-
-		if ((p->type == P_BAT || p->type == P_SPRITE) && p->endtime < 0) {
+		if ( IsOneFrameSprite( *p ) ) {
 			// temporary sprite
 			CG_AddParticleToScene (p, p->org, alpha);
-			p->next = free_particles;
-			free_particles = p;
-			p->type = 0;
-			p->color = 0;
-			p->alpha = 0;
+			RecycleParticle( *p );
 			continue;
 		}
 
-		p->next = NULL;
-		if (!tail)
-			active = tail = p;
-		else
-		{
-			tail->next = p;
-			tail = p;
-		}
+		AppendActiveParticle( active, tail, *p );
 
 		if (alpha > 1.0)
 			alpha = 1;
-
-		//color = p->color;
 
 		time2 = time*time;
 
 		org[0] = p->org[0] + p->vel[0]*time + p->accel[0]*time2;
 		org[1] = p->org[1] + p->vel[1]*time + p->accel[1]*time2;
 		org[2] = p->org[2] + p->vel[2]*time + p->accel[2]*time2;
-
-		//type = p->type;
 
 		CG_AddParticleToScene (p, org, alpha);
 	}
@@ -1204,12 +1250,9 @@ void CG_ParticleSnowFlurry (qhandle_t pshader, centity_t *cent)
 	if (!pshader)
 		CG_Printf ("CG_ParticleSnowFlurry pshader == ZERO!\n");
 
-	if (!free_particles)
+	p = AllocateParticle();
+	if (p == nullptr)
 		return;
-	p = free_particles;
-	free_particles = p->next;
-	p->next = active_particles;
-	active_particles = p;
 	p->time = cg.time;
 	p->color = 0;
 	p->alpha = 0.90f;
@@ -1271,12 +1314,9 @@ void CG_ParticleSnow (qhandle_t pshader, vec3_t origin, vec3_t origin2, int turb
 	if (!pshader)
 		CG_Printf ("CG_ParticleSnow pshader == ZERO!\n");
 
-	if (!free_particles)
+	p = AllocateParticle();
+	if (p == nullptr)
 		return;
-	p = free_particles;
-	free_particles = p->next;
-	p->next = active_particles;
-	active_particles = p;
 	p->time = cg.time;
 	p->color = 0;
 	p->alpha = 0.40f;
@@ -1329,12 +1369,9 @@ void CG_ParticleBubble (qhandle_t pshader, vec3_t origin, vec3_t origin2, int tu
 	if (!pshader)
 		CG_Printf ("CG_ParticleSnow pshader == ZERO!\n");
 
-	if (!free_particles)
+	p = AllocateParticle();
+	if (p == nullptr)
 		return;
-	p = free_particles;
-	free_particles = p->next;
-	p->next = active_particles;
-	active_particles = p;
 	p->time = cg.time;
 	p->color = 0;
 	p->alpha = 0.40f;
@@ -1392,12 +1429,9 @@ void CG_ParticleSmoke (qhandle_t pshader, centity_t *cent)
 	if (!pshader)
 		CG_Printf ("CG_ParticleSmoke == ZERO!\n");
 
-	if (!free_particles)
+	p = AllocateParticle();
+	if (p == nullptr)
 		return;
-	p = free_particles;
-	free_particles = p->next;
-	p->next = active_particles;
-	active_particles = p;
 	p->time = cg.time;
 	
 	p->endtime = cg.time + cent->currentState.time;
@@ -1435,12 +1469,9 @@ void CG_ParticleBulletDebris (vec3_t org, vec3_t vel, int duration)
 
 	cparticle_t	*p;
 
-	if (!free_particles)
+	p = AllocateParticle();
+	if (p == nullptr)
 		return;
-	p = free_particles;
-	free_particles = p->next;
-	p->next = active_particles;
-	active_particles = p;
 	p->time = cg.time;
 	
 	p->endtime = cg.time + duration;
@@ -1495,12 +1526,9 @@ void CG_ParticleExplosion( const char *animStr, const vec3_t origin, const vec3_
 		return;
 	}
 
-	if (!free_particles)
+	p = AllocateParticle();
+	if (p == nullptr)
 		return;
-	p = free_particles;
-	free_particles = p->next;
-	p->next = active_particles;
-	active_particles = p;
 	p->time = cg.time;
 	p->alpha = 0.5;
 	p->alphavel = 0;
@@ -1640,12 +1668,9 @@ void CG_ParticleImpactSmokePuff (qhandle_t pshader, vec3_t origin)
 	if (!pshader)
 		CG_Printf ("CG_ParticleImpactSmokePuff pshader == ZERO!\n");
 
-	if (!free_particles)
+	p = AllocateParticle();
+	if (p == nullptr)
 		return;
-	p = free_particles;
-	free_particles = p->next;
-	p->next = active_particles;
-	active_particles = p;
 	p->time = cg.time;
 	p->alpha = 0.25;
 	p->alphavel = 0;
@@ -1680,12 +1705,9 @@ void CG_Particle_Bleed (qhandle_t pshader, vec3_t start, vec3_t dir, int fleshEn
 	if (!pshader)
 		CG_Printf ("CG_Particle_Bleed pshader == ZERO!\n");
 
-	if (!free_particles)
+	p = AllocateParticle();
+	if (p == nullptr)
 		return;
-	p = free_particles;
-	free_particles = p->next;
-	p->next = active_particles;
-	active_particles = p;
 	p->time = cg.time;
 	p->alpha = 1.0;
 	p->alphavel = 0;
@@ -1741,12 +1763,9 @@ void CG_Particle_OilParticle (qhandle_t pshader, centity_t *cent)
 	if (!pshader)
 		CG_Printf ("CG_Particle_OilParticle == ZERO!\n");
 
-	if (!free_particles)
+	p = AllocateParticle();
+	if (p == nullptr)
 		return;
-	p = free_particles;
-	free_particles = p->next;
-	p->next = active_particles;
-	active_particles = p;
 	p->time = cg.time;
 	p->alpha = 1.0;
 	p->alphavel = 0;
@@ -1794,12 +1813,9 @@ void CG_Particle_OilSlick (qhandle_t pshader, centity_t *cent)
   	if (!pshader)
 		CG_Printf ("CG_Particle_OilSlick == ZERO!\n");
 
-	if (!free_particles)
+	p = AllocateParticle();
+	if (p == nullptr)
 		return;
-	p = free_particles;
-	free_particles = p->next;
-	p->next = active_particles;
-	active_particles = p;
 	p->time = cg.time;
 	
 	if (cent->currentState.angles2[2])
@@ -1936,9 +1952,6 @@ void CG_BloodPool (localEntity_t *le, qhandle_t pshader, trace_t *tr)
 	
 	if (!pshader)
 		CG_Printf ("CG_BloodPool pshader == ZERO!\n");
-
-	if (!free_particles)
-		return;
 	
 	VectorCopy (tr->endpos, start);
 	legit = ValidBloodPool (start);
@@ -1946,10 +1959,9 @@ void CG_BloodPool (localEntity_t *le, qhandle_t pshader, trace_t *tr)
 	if (!legit) 
 		return;
 
-	p = free_particles;
-	free_particles = p->next;
-	p->next = active_particles;
-	active_particles = p;
+	p = AllocateParticle();
+	if (p == nullptr)
+		return;
 	p->time = cg.time;
 	
 	p->endtime = cg.time + 3000;
@@ -2020,13 +2032,9 @@ void CG_ParticleBloodCloud (centity_t *cent, vec3_t origin, vec3_t dir)
 	{
 		VectorMA (point, crittersize, forward, point);	
 		
-		if (!free_particles)
+		p = AllocateParticle();
+		if (p == nullptr)
 			return;
-
-		p = free_particles;
-		free_particles = p->next;
-		p->next = active_particles;
-		active_particles = p;
 
 		p->time = cg.time;
 		p->alpha = 1.0;
@@ -2069,12 +2077,9 @@ void CG_ParticleSparks (vec3_t org, vec3_t vel, int duration, float x, float y, 
 {
 	cparticle_t	*p;
 
-	if (!free_particles)
+	p = AllocateParticle();
+	if (p == nullptr)
 		return;
-	p = free_particles;
-	free_particles = p->next;
-	p->next = active_particles;
-	active_particles = p;
 	p->time = cg.time;
 	
 	p->endtime = cg.time + duration;
@@ -2144,13 +2149,9 @@ void CG_ParticleDust (centity_t *cent, vec3_t origin, vec3_t dir)
 	{
 		VectorMA (point, crittersize, forward, point);	
 				
-		if (!free_particles)
+		p = AllocateParticle();
+		if (p == nullptr)
 			return;
-
-		p = free_particles;
-		free_particles = p->next;
-		p->next = active_particles;
-		active_particles = p;
 
 		p->time = cg.time;
 		p->alpha = 5.0;
@@ -2216,13 +2217,9 @@ void CG_ParticleMisc (qhandle_t pshader, vec3_t origin, int size, int duration, 
 	if (!pshader)
 		CG_Printf ("CG_ParticleImpactSmokePuff pshader == ZERO!\n");
 
-	if (!free_particles)
+	p = AllocateParticle();
+	if (p == nullptr)
 		return;
-
-	p = free_particles;
-	free_particles = p->next;
-	p->next = active_particles;
-	active_particles = p;
 	p->time = cg.time;
 	p->alpha = 1.0;
 	p->alphavel = 0;

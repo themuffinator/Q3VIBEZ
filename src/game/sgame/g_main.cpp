@@ -1,6 +1,10 @@
 // Copyright (C) 1999-2000 Id Software, Inc.
 //
 
+#include <algorithm>
+#include <array>
+#include <span>
+
 #include "g_local.h"
 
 level_locals_t	level;
@@ -33,6 +37,94 @@ static cvarTable_t gameCvarTable[] = {
 #undef G_CVAR_LIST
 
 };
+
+namespace {
+auto GameCvars() -> std::span<cvarTable_t> {
+	return gameCvarTable;
+}
+
+void RegisterGameCvar( cvarTable_t &cvarEntry, qboolean &remapped ) {
+	trap_Cvar_Register( cvarEntry.vmCvar, cvarEntry.cvarName, cvarEntry.defaultString, cvarEntry.cvarFlags );
+	if ( cvarEntry.vmCvar ) {
+		cvarEntry.modificationCount = cvarEntry.vmCvar->modificationCount;
+	}
+
+	if ( cvarEntry.teamShader ) {
+		remapped = qtrue;
+	}
+}
+
+void UpdateGameCvar( cvarTable_t &cvarEntry, qboolean &remapped ) {
+	if ( !cvarEntry.vmCvar ) {
+		return;
+	}
+
+	trap_Cvar_Update( cvarEntry.vmCvar );
+	if ( cvarEntry.modificationCount == cvarEntry.vmCvar->modificationCount ) {
+		return;
+	}
+
+	cvarEntry.modificationCount = cvarEntry.vmCvar->modificationCount;
+	if ( cvarEntry.trackChange ) {
+		G_BroadcastServerCommand( -1, va( "print \"Server: %s changed to %s\n\"", cvarEntry.cvarName, cvarEntry.vmCvar->string ) );
+	}
+
+	if ( cvarEntry.teamShader ) {
+		remapped = qtrue;
+	}
+}
+
+void ResetLevelState( int levelTime ) {
+	level = {};
+	level.time = levelTime;
+	level.startTime = levelTime;
+	level.previousTime = levelTime;
+	level.msec = FRAMETIME;
+}
+
+void ResetEntityStorage() {
+	std::fill_n( g_entities, MAX_GENTITIES, gentity_t{} );
+	level.gentities = g_entities;
+}
+
+void ResetClientStorage() {
+	level.maxclients = g_maxclients.integer;
+	std::fill_n( g_clients, MAX_CLIENTS, gclient_t{} );
+	level.clients = g_clients;
+}
+
+void InitializeClientSlots() {
+	for ( int clientIndex = 0; clientIndex < level.maxclients; ++clientIndex ) {
+		g_entities[ clientIndex ].client = level.clients + clientIndex;
+	}
+
+	level.num_entities = MAX_CLIENTS;
+	for ( auto &entity : std::span{ g_entities }.first( MAX_CLIENTS ) ) {
+		entity.classname = "clientslot";
+	}
+}
+
+void ClearPlayerPowerups( playerState_t &playerState ) {
+	std::fill_n( playerState.powerups, ARRAY_LEN( playerState.powerups ), 0 );
+}
+
+void ResetWarmupClientState( gclient_t &client ) {
+	client.ps.persistant[PERS_IMPRESSIVE_COUNT] = 0;
+	client.ps.persistant[PERS_EXCELLENT_COUNT] = 0;
+	client.ps.persistant[PERS_DEFEND_COUNT] = 0;
+	client.ps.persistant[PERS_ASSIST_COUNT] = 0;
+	client.ps.persistant[PERS_GAUNTLET_FRAG_COUNT] = 0;
+	client.ps.persistant[PERS_SCORE] = 0;
+	client.ps.persistant[PERS_CAPTURES] = 0;
+	client.ps.persistant[PERS_ATTACKER] = ENTITYNUM_NONE;
+	client.ps.persistant[PERS_ATTACKEE_ARMOR] = 0;
+	client.damage.enemy = 0;
+	client.damage.team = 0;
+	client.ps.stats[STAT_CLIENTS_READY] = 0;
+	client.ps.stats[STAT_HOLDABLE_ITEM] = 0;
+	ClearPlayerPowerups( client.ps );
+}
+}
 
 
 static void G_InitGame( int levelTime, int randomSeed, int restart );
@@ -193,14 +285,14 @@ void G_FindTeams( void ) {
 
 void G_RemapTeamShaders( void ) {
 #ifdef MISSIONPACK
-	char string[1024];
+	std::array<char, 1024> string{};
 	float f = level.time * 0.001;
-	Com_sprintf( string, sizeof(string), "team_icon/%s_red", g_redteam.string );
-	AddRemap("textures/ctf2/redteam01", string, f); 
-	AddRemap("textures/ctf2/redteam02", string, f); 
-	Com_sprintf( string, sizeof(string), "team_icon/%s_blue", g_blueteam.string );
-	AddRemap("textures/ctf2/blueteam01", string, f); 
-	AddRemap("textures/ctf2/blueteam02", string, f); 
+	Com_sprintf( string.data(), string.size(), "team_icon/%s_red", g_redteam.string );
+	AddRemap("textures/ctf2/redteam01", string.data(), f); 
+	AddRemap("textures/ctf2/redteam02", string.data(), f); 
+	Com_sprintf( string.data(), string.size(), "team_icon/%s_blue", g_blueteam.string );
+	AddRemap("textures/ctf2/blueteam01", string.data(), f); 
+	AddRemap("textures/ctf2/blueteam02", string.data(), f); 
 	trap_SetConfigstring(CS_SHADERSTATE, BuildShaderStateConfig());
 #endif
 }
@@ -213,21 +305,11 @@ G_RegisterCvars
 */
 void G_RegisterCvars( void ) {
 	qboolean remapped = qfalse;
-	cvarTable_t *cv;
-	int i;
-
-	for ( i = 0, cv = gameCvarTable ; i < ARRAY_LEN( gameCvarTable ) ; i++, cv++ ) {
-		trap_Cvar_Register( cv->vmCvar, cv->cvarName,
-			cv->defaultString, cv->cvarFlags );
-		if ( cv->vmCvar )
-			cv->modificationCount = cv->vmCvar->modificationCount;
-
-		if (cv->teamShader) {
-			remapped = qtrue;
-		}
+	for ( auto &cvarEntry : GameCvars() ) {
+		RegisterGameCvar( cvarEntry, remapped );
 	}
 
-	if (remapped) {
+	if ( remapped ) {
 		G_RemapTeamShaders();
 	}
 
@@ -241,7 +323,7 @@ void G_RegisterCvars( void ) {
 	level.warmupModificationCount = g_warmup.modificationCount;
 
 	// force g_doWarmup to 1
-	trap_Cvar_Register( NULL, "g_doWarmup", "1", CVAR_ROM );
+	trap_Cvar_Register( nullptr, "g_doWarmup", "1", CVAR_ROM );
 	trap_Cvar_Set( "g_doWarmup", "1" );
 }
 
@@ -252,30 +334,13 @@ G_UpdateCvars
 =================
 */
 static void G_UpdateCvars( void ) {
-	int			i;
-	cvarTable_t	*cv;
 	qboolean remapped = qfalse;
 
-	for ( i = 0, cv = gameCvarTable ; i < ARRAY_LEN( gameCvarTable ) ; i++, cv++ ) {
-		if ( cv->vmCvar ) {
-			trap_Cvar_Update( cv->vmCvar );
-
-			if ( cv->modificationCount != cv->vmCvar->modificationCount ) {
-				cv->modificationCount = cv->vmCvar->modificationCount;
-
-				if ( cv->trackChange ) {
-					G_BroadcastServerCommand( -1, va("print \"Server: %s changed to %s\n\"", 
-						cv->cvarName, cv->vmCvar->string ) );
-				}
-
-				if (cv->teamShader) {
-					remapped = qtrue;
-				}
-			}
-		}
+	for ( auto &cvarEntry : GameCvars() ) {
+		UpdateGameCvar( cvarEntry, remapped );
 	}
 
-	if (remapped) {
+	if ( remapped ) {
 		G_RemapTeamShaders();
 	}
 }
@@ -286,7 +351,7 @@ static void G_LocateSpawnSpots( void )
 	gentity_t			*ent;
 	int i, n;
 
-	level.spawnSpots[ SPAWN_SPOT_INTERMISSION ] = NULL;
+	level.spawnSpots[ SPAWN_SPOT_INTERMISSION ] = nullptr;
 
 	// locate all spawn spots
 	n = 0;
@@ -299,7 +364,7 @@ static void G_LocateSpawnSpots( void )
 		// intermission/ffa spots
 		if ( !Q_stricmpn( ent->classname, "info_player_", 12 ) ) {
 			if ( !Q_stricmp( ent->classname+12, "intermission" ) ) {
-				if ( level.spawnSpots[ SPAWN_SPOT_INTERMISSION ] == NULL ) {
+				if ( level.spawnSpots[ SPAWN_SPOT_INTERMISSION ] == nullptr ) {
 					level.spawnSpots[ SPAWN_SPOT_INTERMISSION ] = ent; // put in the last slot
 					ent->fteam = TEAM_FREE;
 				}
@@ -359,23 +424,22 @@ G_InitGame
 ============
 */
 static void G_InitGame( int levelTime, int randomSeed, int restart ) {
-	char value[ MAX_CVAR_VALUE_STRING ];
-	int	i;
+	std::array<char, MAX_CVAR_VALUE_STRING> value{};
 
 	G_Printf ("------- Game Initialization -------\n");
 	G_Printf ("gamename: %s\n", GAMEVERSION);
 	G_Printf ("gamedate: %s\n", __DATE__);
 
 	// extension interface
-	trap_Cvar_VariableStringBuffer( "//trap_GetValue", value, sizeof( value ) );
+	trap_Cvar_VariableStringBuffer( "//trap_GetValue", value.data(), value.size() );
 	if ( value[0] ) {
 #ifdef Q3_VM
-		trap_GetValue = (void*)~atoi( value );
+		trap_GetValue = (void*)~atoi( value.data() );
 #else
-		dll_com_trapGetValue = atoi( value );
+		dll_com_trapGetValue = atoi( value.data() );
 #endif
-		if ( trap_GetValue( value, sizeof( value ), "SVF_SELF_PORTAL2_Q3E" ) ) {
-			svf_self_portal2 = atoi( value );
+		if ( trap_GetValue( value.data(), value.size(), "SVF_SELF_PORTAL2_Q3E" ) ) {
+			svf_self_portal2 = atoi( value.data() );
 		} else {
 			svf_self_portal2 = 0;
 		}
@@ -390,13 +454,7 @@ static void G_InitGame( int levelTime, int randomSeed, int restart ) {
 	G_InitMemory();
 
 	// set some level globals
-	memset( &level, 0, sizeof( level ) );
-	level.time = levelTime;
-
-	level.startTime = levelTime;
-
-	level.previousTime = levelTime;
-	level.msec = FRAMETIME;
+	ResetLevelState( levelTime );
 
 	level.snd_fry = G_SoundIndex("sound/player/fry.wav");	// FIXME standing in lava / slime
 
@@ -409,12 +467,12 @@ static void G_InitGame( int levelTime, int randomSeed, int restart ) {
 		if ( level.logFile == FS_INVALID_HANDLE ) {
 			G_Printf( "WARNING: Couldn't open logfile: %s\n", g_log.string );
 		} else {
-			char	serverinfo[MAX_INFO_STRING];
+			std::array<char, MAX_INFO_STRING> serverinfo{};
 
-			trap_GetServerinfo( serverinfo, sizeof( serverinfo ) );
+			trap_GetServerinfo( serverinfo.data(), serverinfo.size() );
 
 			G_LogPrintf("------------------------------------------------------------\n" );
-			G_LogPrintf("InitGame: %s\n", serverinfo );
+			G_LogPrintf("InitGame: %s\n", serverinfo.data() );
 		}
 	} else {
 		G_Printf( "Not logging to disk.\n" );
@@ -423,27 +481,11 @@ static void G_InitGame( int levelTime, int randomSeed, int restart ) {
 	G_InitWorldSession();
 
 	// initialize all entities for this game
-	memset( g_entities, 0, MAX_GENTITIES * sizeof(g_entities[0]) );
-	level.gentities = g_entities;
+	ResetEntityStorage();
 
 	// initialize all clients for this game
-	level.maxclients = g_maxclients.integer;
-	memset( g_clients, 0, MAX_CLIENTS * sizeof(g_clients[0]) );
-	level.clients = g_clients;
-
-	// set client fields on player ents
-	for ( i=0 ; i<level.maxclients ; i++ ) {
-		g_entities[i].client = level.clients + i;
-	}
-
-	// always leave room for the max number of clients,
-	// even if they aren't all used, so numbers inside that
-	// range are NEVER anything but clients
-	level.num_entities = MAX_CLIENTS;
-
-	for ( i = 0 ; i < MAX_CLIENTS ; i++ ) {
-		g_entities[ i ].classname = "clientslot";
-	}
+	ResetClientStorage();
+	InitializeClientSlots();
 
 	// let the server system know where the entites are
 	trap_LocateGameData( level.gentities, level.num_entities, sizeof( gentity_t ), 
@@ -1437,7 +1479,7 @@ static void G_WarmupEnd( void )
 	// return flags
 	Team_ResetFlags();
 
-	memset( level.teamScores, 0, sizeof( level.teamScores ) );
+	std::fill_n( level.teamScores, ARRAY_LEN( level.teamScores ), 0 );
 
 	level.warmupTime = 0;
 	level.startTime = level.time;
@@ -1453,24 +1495,7 @@ static void G_WarmupEnd( void )
 		if ( client->pers.connected != CON_CONNECTED )
 			continue;
 
-		// reset player awards
-		client->ps.persistant[PERS_IMPRESSIVE_COUNT] = 0;
-		client->ps.persistant[PERS_EXCELLENT_COUNT] = 0;
-		client->ps.persistant[PERS_DEFEND_COUNT] = 0;
-		client->ps.persistant[PERS_ASSIST_COUNT] = 0;
-		client->ps.persistant[PERS_GAUNTLET_FRAG_COUNT] = 0;
-
-		client->ps.persistant[PERS_SCORE] = 0;
-		client->ps.persistant[PERS_CAPTURES] = 0;
-
-		client->ps.persistant[PERS_ATTACKER] = ENTITYNUM_NONE;
-		client->ps.persistant[PERS_ATTACKEE_ARMOR] = 0;
-		client->damage.enemy = client->damage.team = 0;
-
-		client->ps.stats[STAT_CLIENTS_READY] = 0;
-		client->ps.stats[STAT_HOLDABLE_ITEM] = 0;
-
-		memset( &client->ps.powerups, 0, sizeof( client->ps.powerups ) );
+		ResetWarmupClientState( *client );
 
 		ClientUserinfoChanged( i ); // set max.health etc.
 

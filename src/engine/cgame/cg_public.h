@@ -53,6 +53,14 @@ typedef struct {
 	int				serverCommandSequence;	// snapshot becomes current
 } snapshot_t;
 
+#ifdef __cplusplus
+static_assert( offsetof( snapshot_t, areamask ) == 3 * sizeof( int ), "snapshot_t::areamask ABI changed" );
+static_assert( offsetof( snapshot_t, ps ) == 3 * sizeof( int ) + MAX_MAP_AREA_BYTES, "snapshot_t::ps ABI changed" );
+static_assert( offsetof( snapshot_t, numEntities ) == offsetof( snapshot_t, ps ) + sizeof( playerState_t ), "snapshot_t::numEntities ABI changed" );
+static_assert( offsetof( snapshot_t, entities ) == offsetof( snapshot_t, numEntities ) + sizeof( int ), "snapshot_t::entities ABI changed" );
+static_assert( offsetof( snapshot_t, serverCommandSequence ) == offsetof( snapshot_t, numServerCommands ) + sizeof( int ), "snapshot_t::serverCommandSequence ABI changed" );
+#endif
+
 enum {
   CGAME_EVENT_NONE,
   CGAME_EVENT_TEAMMENU,
@@ -239,5 +247,10 @@ typedef enum {
 
 	CG_EXPORT_LAST,
 } cgameExport_t;
+
+#ifdef __cplusplus
+static_assert( sizeof( cgameImport_t ) == sizeof( int ), "cgameImport_t must remain int-sized" );
+static_assert( sizeof( cgameExport_t ) == sizeof( int ), "cgameExport_t must remain int-sized" );
+#endif
 
 //----------------------------------------------

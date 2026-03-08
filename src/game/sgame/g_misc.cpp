@@ -329,6 +329,54 @@ void SP_shooter_grenade( gentity_t *ent ) {
 
 
 #ifdef MISSIONPACK
+namespace {
+
+[[nodiscard]] gentity_t *FindPortalDestinationById( const int portalId ) {
+	for ( gentity_t *destination = nullptr;
+		( destination = G_Find( destination, FOFS( classname ), "hi_portal destination" ) ) != nullptr; ) {
+		if ( destination->count == portalId ) {
+			return destination;
+		}
+	}
+
+	return nullptr;
+}
+
+bool TryDropPortalFlag( gentity_t *player, const powerup_t powerup ) {
+	if ( !player->client->ps.powerups[ powerup ] ) {
+		return false;
+	}
+
+	Drop_Item( player, BG_FindItemForPowerup( powerup ), 0 );
+	player->client->ps.powerups[ powerup ] = 0;
+	return true;
+}
+
+void DropPortalFlags( gentity_t *player ) {
+	if ( TryDropPortalFlag( player, PW_NEUTRALFLAG ) ) {
+		return;
+	}
+	if ( TryDropPortalFlag( player, PW_REDFLAG ) ) {
+		return;
+	}
+
+	TryDropPortalFlag( player, PW_BLUEFLAG );
+}
+
+[[nodiscard]] bool HasSavedPortalPosition( const gentity_t *portal ) noexcept {
+	return portal->pos1[0] != 0 || portal->pos1[1] != 0 || portal->pos1[2] != 0;
+}
+
+void TelefragPortalUser( gentity_t *portal, gentity_t *player ) {
+	if ( HasSavedPortalPosition( portal ) ) {
+		TeleportPlayer( player, portal->pos1, portal->s.angles );
+	}
+
+	G_Damage( player, player, player, nullptr, nullptr, 100000, DAMAGE_NO_PROTECTION, MOD_TELEFRAG );
+}
+
+} // namespace
+
 static void PortalDie (gentity_t *self, gentity_t *inflictor, gentity_t *attacker, int damage, int mod) {
 	G_FreeEntity( self );
 	//FIXME do something more interesting
@@ -373,8 +421,6 @@ void DropPortalDestination( gentity_t *player ) {
 
 
 static void PortalTouch( gentity_t *self, gentity_t *other, trace_t *trace) {
-	gentity_t	*destination;
-
 	// see if we will even let other try to use it
 	if( other->health <= 0 ) {
 		return;
@@ -386,33 +432,14 @@ static void PortalTouch( gentity_t *self, gentity_t *other, trace_t *trace) {
 //		return;
 //	}
 
-	if ( other->client->ps.powerups[PW_NEUTRALFLAG] ) {		// only happens in One Flag CTF
-		Drop_Item( other, BG_FindItemForPowerup( PW_NEUTRALFLAG ), 0 );
-		other->client->ps.powerups[PW_NEUTRALFLAG] = 0;
-	}
-	else if ( other->client->ps.powerups[PW_REDFLAG] ) {		// only happens in standard CTF
-		Drop_Item( other, BG_FindItemForPowerup( PW_REDFLAG ), 0 );
-		other->client->ps.powerups[PW_REDFLAG] = 0;
-	}
-	else if ( other->client->ps.powerups[PW_BLUEFLAG] ) {	// only happens in standard CTF
-		Drop_Item( other, BG_FindItemForPowerup( PW_BLUEFLAG ), 0 );
-		other->client->ps.powerups[PW_BLUEFLAG] = 0;
-	}
+	DropPortalFlags( other );
 
 	// find the destination
-	destination = NULL;
-	while( (destination = G_Find(destination, FOFS(classname), "hi_portal destination")) != NULL ) {
-		if( destination->count == self->count ) {
-			break;
-		}
-	}
+	gentity_t *destination = FindPortalDestinationById( self->count );
 
 	// if there is not one, die!
 	if( !destination ) {
-		if( self->pos1[0] || self->pos1[1] || self->pos1[2] ) {
-			TeleportPlayer( other, self->pos1, self->s.angles );
-		}
-		G_Damage( other, other, other, NULL, NULL, 100000, DAMAGE_NO_PROTECTION, MOD_TELEFRAG );
+		TelefragPortalUser( self, other );
 		return;
 	}
 
@@ -429,7 +456,6 @@ static void PortalEnable( gentity_t *self ) {
 
 void DropPortalSource( gentity_t *player ) {
 	gentity_t	*ent;
-	gentity_t	*destination;
 	vec3_t		snapped;
 
 	// create the portal source
@@ -461,12 +487,8 @@ void DropPortalSource( gentity_t *player ) {
 	ent->think = PortalEnable;
 
 	// find the destination
-	destination = NULL;
-	while( (destination = G_Find(destination, FOFS(classname), "hi_portal destination")) != NULL ) {
-		if( destination->count == ent->count ) {
-			VectorCopy( destination->s.pos.trBase, ent->pos1 );
-			break;
-		}
+	if ( gentity_t *destination = FindPortalDestinationById( ent->count ); destination != nullptr ) {
+		VectorCopy( destination->s.pos.trBase, ent->pos1 );
 	}
 
 }

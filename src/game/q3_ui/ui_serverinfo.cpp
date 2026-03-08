@@ -2,22 +2,53 @@
 //
 #include "ui_local.h"
 
+#include <algorithm>
+#include <array>
+#include <cstring>
+
 #define SERVERINFO_FRAMEL	"menu/art/frame2_l"
 #define SERVERINFO_FRAMER	"menu/art/frame1_r"
 #define SERVERINFO_BACK0	"menu/art/back_0"
 #define SERVERINFO_BACK1	"menu/art/back_1"
 
-static char* serverinfo_artlist[] =
-{
-	SERVERINFO_FRAMEL,	
-	SERVERINFO_FRAMER,
-	SERVERINFO_BACK0,
-	SERVERINFO_BACK1,
-	NULL
-};
-
 #define ID_ADD	 100
 #define ID_BACK	 101
+
+#define MAX_INFO_LINES		64
+#define INFO_LINE_WIDTH		51
+
+namespace {
+
+constexpr std::array<const char *, 4> ServerInfoArtList = {
+	SERVERINFO_FRAMEL,
+	SERVERINFO_FRAMER,
+	SERVERINFO_BACK0,
+	SERVERINFO_BACK1
+};
+
+using FavoriteAddressBuffer = std::array<char, 128>;
+using ServerInfoLines = std::array<std::array<char, INFO_LINE_WIDTH * 3>, MAX_INFO_LINES>;
+using ServerInfoItems = std::array<const char *, MAX_INFO_LINES>;
+
+FavoriteAddressBuffer ServerAddressBuffer() {
+	return {};
+}
+
+qboolean IsAvailableFavoriteSlot( const char *address, const int bestSlot ) {
+	return bestSlot == 0 && ( address[0] < '0' || address[0] > '9' );
+}
+
+void BuildServerInfoLine( std::array<char, INFO_LINE_WIDTH * 3> &destination, const char *key, const char *value, const int maxKeyLength ) {
+	std::array<char, MAX_INFO_VALUE * 2> line{};
+	const int padding = maxKeyLength - static_cast<int>( std::strlen( key ) );
+
+	std::fill_n( line.data(), padding, ' ' );
+	BG_sprintf( line.data() + padding, "%s ^3%s", key, value );
+	line[destination.size() - 1] = '\0';
+	Q_strncpyz( destination.data(), line.data(), static_cast<int>( destination.size() ) );
+}
+
+}
 
 typedef struct
 {
@@ -33,11 +64,8 @@ typedef struct
 
 static serverinfo_t	s_serverinfo;
 
-#define MAX_INFO_LINES		64
-#define INFO_LINE_WIDTH		51
-
-static	char	*itemnames[MAX_INFO_LINES];
-static	char	show_info[MAX_INFO_LINES][INFO_LINE_WIDTH*3];
+static ServerInfoItems itemnames;
+static ServerInfoLines show_info;
 
 /*
 =================
@@ -48,32 +76,32 @@ Add current server to favorites
 */
 void Favorites_Add( void )
 {
-	char	adrstr[128];
-	char	serverbuff[128];
+	auto adrstr = ServerAddressBuffer();
+	auto serverbuff = ServerAddressBuffer();
 	int		i;
 	int		best;
 
-	trap_Cvar_VariableStringBuffer( "cl_currentServerAddress", serverbuff, sizeof(serverbuff) );
-	if (!serverbuff[0])
+	trap_Cvar_VariableStringBuffer( "cl_currentServerAddress", serverbuff.data(), static_cast<int>( serverbuff.size() ) );
+	if( !serverbuff[0] )
 		return;
 
 	best = 0;
-	for (i=0; i<MAX_FAVORITESERVERS; i++)
-	{
-		trap_Cvar_VariableStringBuffer( va("server%d",i+1), adrstr, sizeof(adrstr) );
-		if (!Q_stricmp(serverbuff,adrstr))
-		{
+	for( i = 0; i < MAX_FAVORITESERVERS; i++ ) {
+		trap_Cvar_VariableStringBuffer( va("server%d",i+1), adrstr.data(), static_cast<int>( adrstr.size() ) );
+		if( !Q_stricmp( serverbuff.data(), adrstr.data() ) ) {
 			// already in list
 			return;
 		}
 		
 		// use first empty or non-numeric available slot
-		if ((adrstr[0]  < '0' || adrstr[0] > '9' ) && !best)
+		if( IsAvailableFavoriteSlot( adrstr.data(), best ) ) {
 			best = i+1;
+		}
 	}
 
-	if (best)
-		trap_Cvar_Set( va("server%d",best), serverbuff);
+	if( best ) {
+		trap_Cvar_Set( va("server%d",best), serverbuff.data() );
+	}
 }
 
 
@@ -120,14 +148,8 @@ ServerInfo_Cache
 */
 void ServerInfo_Cache( void )
 {
-	int	i;
-
-	// touch all our pics
-	for (i=0; ;i++)
-	{
-		if (!serverinfo_artlist[i])
-			break;
-		trap_R_RegisterShaderNoMip(serverinfo_artlist[i]);
+	for( const char *const shader : ServerInfoArtList ) {
+		trap_R_RegisterShaderNoMip( shader );
 	}
 }
 
@@ -139,12 +161,13 @@ UI_ServerInfoMenu
 void UI_ServerInfoMenu( void )
 {
 	const char		*s;
-	char			key[MAX_INFO_KEY], *str;
-	char			value[MAX_INFO_VALUE], buf[MAX_INFO_VALUE*2];
-	int				i, len, max;
+	std::array<char, MAX_INFO_KEY> key{};
+	std::array<char, MAX_INFO_VALUE> value{};
+	int				len, max;
 
 	// zero set all our globals
-	memset( &s_serverinfo, 0 ,sizeof(serverinfo_t) );
+	s_serverinfo = {};
+	itemnames.fill( nullptr );
 
 	ServerInfo_Cache();
 
@@ -204,11 +227,11 @@ void UI_ServerInfoMenu( void )
 	max = 0;
 	s = s_serverinfo.info;
 	do {
-		s = Info_NextPair( s, key, value );
+		s = Info_NextPair( s, key.data(), value.data() );
 		if ( key[0] == '\0' ) {
 			break;
 		}
-		len = strlen( key );
+		len = static_cast<int>( std::strlen( key.data() ) );
 		if ( len > max )
 			max = len;
 	} while ( *s != '\0' );
@@ -223,29 +246,17 @@ void UI_ServerInfoMenu( void )
 	s_serverinfo.list.columns			= 1;
 	s_serverinfo.list.scroll			= 1;
 
-	s_serverinfo.list.itemnames = (const char **)itemnames;
+	s_serverinfo.list.itemnames = itemnames.data();
 
 	s_serverinfo.list.numitems = 0;
 	s = s_serverinfo.info;
 	do {
-		s = Info_NextPair( s, key, value );
+		s = Info_NextPair( s, key.data(), value.data() );
 		if ( key[0] == '\0' )
 			break;
 
-		str = show_info[s_serverinfo.list.numitems];
-		s_serverinfo.list.itemnames[s_serverinfo.list.numitems] = str;
-		
-		len = strlen( key );
-		len = max - len; 
-
-		// align key name
-		for ( i = 0; i < len; i++ )
-			buf[i] = ' ';
-		BG_sprintf( buf + i, "%s ^3%s", key, value );
-
-		// take care about overflow in destination string
-		buf[INFO_LINE_WIDTH*3-1] = '\0';
-		strcpy( str, buf );
+		BuildServerInfoLine( show_info[s_serverinfo.list.numitems], key.data(), value.data(), max );
+		s_serverinfo.list.itemnames[s_serverinfo.list.numitems] = show_info[s_serverinfo.list.numitems].data();
 		s_serverinfo.list.numitems++;
 		if ( s_serverinfo.list.numitems >= MAX_INFO_LINES )
 			break;
@@ -260,5 +271,3 @@ void UI_ServerInfoMenu( void )
 
 	UI_PushMenu( &s_serverinfo.menu );
 }
-
-

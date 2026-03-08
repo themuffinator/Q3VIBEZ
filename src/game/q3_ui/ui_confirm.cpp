@@ -36,6 +36,14 @@ typedef struct {
 
 static confirmMenu_t	s_confirm;
 
+namespace {
+
+qboolean ConfirmMenuFullscreen( const uiClientState_t &clientState ) {
+	return clientState.connState < CA_CONNECTED;
+}
+
+}
+
 
 /*
 =================
@@ -99,14 +107,13 @@ MessaheMenu_Draw
 =================
 */
 static void MessageMenu_Draw( void ) {
-	int i,y;
+	int y;
 	
 	UI_DrawNamedPic( 142, 118, 359, 256, ART_CONFIRM_FRAME );
 	
 	y = 188;
-	for(i=0; s_confirm.lines[i]; i++)
-	{
-		UI_DrawProportionalString( 320, y, s_confirm.lines[i], s_confirm.style, color_red );
+	for( const char *const *line = s_confirm.lines; line != nullptr && *line != nullptr; ++line ) {
+		UI_DrawProportionalString( 320, y, *line, s_confirm.style, color_red );
 		y += 18;
 	}
 
@@ -156,7 +163,7 @@ void UI_ConfirmMenu_Style( const char *question, int style, void (*draw)( void )
 	int	l1, l2, l3;
 
 	// zero set all our globals
-	memset( &s_confirm, 0, sizeof(s_confirm) );
+	s_confirm = {};
 
 	ConfirmMenu_Cache();
 
@@ -178,12 +185,7 @@ void UI_ConfirmMenu_Style( const char *question, int style, void (*draw)( void )
 	s_confirm.menu.wrapAround = qtrue;
 
 	trap_GetClientState( &cstate );
-	if ( cstate.connState >= CA_CONNECTED ) {
-		s_confirm.menu.fullscreen = qfalse;
-	}
-	else {
-		s_confirm.menu.fullscreen = qtrue;
-	}
+	s_confirm.menu.fullscreen = ConfirmMenuFullscreen( cstate );
 
 	s_confirm.yes.generic.type		= MTYPE_PTEXT;      
 	s_confirm.yes.generic.flags		= QMF_LEFT_JUSTIFY|QMF_PULSEIFFOCUS; 
@@ -233,7 +235,7 @@ void UI_Message( const char **lines ) {
 	int n1, l1;
 	
 	// zero set all our globals
-	memset( &s_confirm, 0, sizeof(s_confirm) );
+	s_confirm = {};
 
 	ConfirmMenu_Cache();
 
@@ -248,12 +250,7 @@ void UI_Message( const char **lines ) {
 	s_confirm.menu.wrapAround = qtrue;
 	
 	trap_GetClientState( &cstate );
-	if ( cstate.connState >= CA_CONNECTED ) {
-		s_confirm.menu.fullscreen = qfalse;
-	}
-	else {
-		s_confirm.menu.fullscreen = qtrue;
-	}
+	s_confirm.menu.fullscreen = ConfirmMenuFullscreen( cstate );
 
 	s_confirm.yes.generic.type		= MTYPE_PTEXT;      
 	s_confirm.yes.generic.flags		= QMF_LEFT_JUSTIFY|QMF_PULSEIFFOCUS; 

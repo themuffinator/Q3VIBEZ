@@ -3,11 +3,11 @@
 #ifndef __UI_LOCAL_H__
 #define __UI_LOCAL_H__
 
-#include "../game/q_shared.h"
+#include "../sgame/q_shared.h"
 #include "../cgame/tr_types.h"
 #include "ui_public.h"
 #include "keycodes.h"
-#include "../game/bg_public.h"
+#include "../sgame/bg_public.h"
 #include "ui_shared.h"
 
 // global display context

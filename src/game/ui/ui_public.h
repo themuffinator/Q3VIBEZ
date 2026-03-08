@@ -14,6 +14,13 @@ typedef struct {
 	char			messageString[MAX_STRING_CHARS];
 } uiClientState_t;
 
+#ifdef __cplusplus
+static_assert( offsetof( uiClientState_t, servername ) == 3 * sizeof( int ), "uiClientState_t::servername ABI changed" );
+static_assert( offsetof( uiClientState_t, updateInfoString ) == offsetof( uiClientState_t, servername ) + MAX_STRING_CHARS, "uiClientState_t::updateInfoString ABI changed" );
+static_assert( offsetof( uiClientState_t, messageString ) == offsetof( uiClientState_t, updateInfoString ) + MAX_STRING_CHARS, "uiClientState_t::messageString ABI changed" );
+static_assert( sizeof( uiClientState_t ) == offsetof( uiClientState_t, messageString ) + MAX_STRING_CHARS, "uiClientState_t ABI changed" );
+#endif
+
 typedef enum {
 	UI_ERROR,
 	UI_PRINT,
@@ -167,5 +174,10 @@ typedef enum {
 // overlayed over whatever the cgame has drawn.
 // a GetClientState syscall will be made to get the current strings
 } uiExport_t;
+
+#ifdef __cplusplus
+static_assert( sizeof( uiImport_t ) == sizeof( int ), "uiImport_t must remain int-sized" );
+static_assert( sizeof( uiExport_t ) == sizeof( int ), "uiExport_t must remain int-sized" );
+#endif
 
 #endif

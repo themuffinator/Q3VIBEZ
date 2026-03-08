@@ -4,13 +4,17 @@
 
 #include "g_local.h"
 
+#include <algorithm>
+#include <array>
+#include <span>
+
 
 static int		g_numBots;
-static char		*g_botInfos[MAX_BOTS];
+static std::array<char *, MAX_BOTS> g_botInfos{};
 
 
 int				g_numArenas;
-static char		*g_arenaInfos[MAX_ARENAS];
+static std::array<char *, MAX_ARENAS> g_arenaInfos{};
 
 
 #define BOT_BEGIN_DELAY_BASE		2000
@@ -23,7 +27,7 @@ typedef struct {
 	int		spawnTime;
 } botSpawnQueue_t;
 
-static botSpawnQueue_t	botSpawnQueue[BOT_SPAWN_QUEUE_DEPTH];
+static std::array<botSpawnQueue_t, BOT_SPAWN_QUEUE_DEPTH> botSpawnQueue{};
 
 vmCvar_t bot_minplayers;
 
@@ -33,11 +37,88 @@ extern gentity_t	*podium3;
 
 extern char mapname[ MAX_QPATH ];
 
-float trap_Cvar_VariableValue( const char *var_name ) {
-	char buf[128];
+template <std::size_t Size>
+[[nodiscard]] static bool ReadTextFile( const char *filename, std::array<char, Size> &buffer ) {
+	fileHandle_t	f;
+	const int maxTextSize = static_cast<int>( buffer.size() - 1 );
+	const int len = trap_FS_FOpenFile( filename, &f, FS_READ );
+	if ( f == FS_INVALID_HANDLE ) {
+		trap_Print( va( S_COLOR_RED "file not found: %s\n", filename ) );
+		return false;
+	}
+	if ( len >= maxTextSize ) {
+		trap_Print( va( S_COLOR_RED "file too large: %s is %i, max allowed is %i\n", filename, len, maxTextSize ) );
+		trap_FS_FCloseFile( f );
+		return false;
+	}
 
-	trap_Cvar_VariableStringBuffer(var_name, buf, sizeof(buf));
-	return atof(buf);
+	trap_FS_Read( buffer.data(), len, f );
+	buffer[len] = '\0';
+	trap_FS_FCloseFile( f );
+	return true;
+}
+
+template <std::size_t Size>
+static void BuildScriptPath( std::array<char, Size> &path, const char *filename ) {
+	Q_strncpyz( path.data(), "scripts/", static_cast<int>( path.size() ) );
+	Q_strcat( path.data(), static_cast<int>( path.size() ), filename );
+}
+
+template <std::size_t Size>
+[[nodiscard]] static auto RemainingInfoSlots( std::array<char *, Size> &infos, const int currentCount ) noexcept -> std::span<char *> {
+	const auto currentIndex = static_cast<std::size_t>( currentCount );
+	return std::span{ infos }.subspan( currentIndex, infos.size() - currentIndex );
+}
+
+[[nodiscard]] static auto BotSpawnQueueEntries() noexcept -> std::span<botSpawnQueue_t> {
+	return botSpawnQueue;
+}
+
+[[nodiscard]] static botSpawnQueue_t *FindFreeBotSpawnSlot() noexcept {
+	const auto slot = std::find_if( botSpawnQueue.begin(), botSpawnQueue.end(), []( const botSpawnQueue_t &entry ) {
+		return entry.spawnTime == 0;
+	} );
+	return slot != botSpawnQueue.end() ? &*slot : nullptr;
+}
+
+[[nodiscard]] static botSpawnQueue_t *FindQueuedBotSpawnSlot( const int clientNum ) noexcept {
+	const auto slot = std::find_if( botSpawnQueue.begin(), botSpawnQueue.end(), [clientNum]( const botSpawnQueue_t &entry ) {
+		return entry.clientNum == clientNum;
+	} );
+	return slot != botSpawnQueue.end() ? &*slot : nullptr;
+}
+
+[[nodiscard]] static float ClampBotSkill( const float skill ) noexcept {
+	return std::clamp( skill, 1.0f, 5.0f );
+}
+
+[[nodiscard]] static float ConfiguredSinglePlayerBotSkill() {
+	const float configuredSkill = trap_Cvar_VariableValue( "g_spSkill" );
+	const float skill = ClampBotSkill( configuredSkill );
+	if ( configuredSkill < 1.0f ) {
+		trap_Cvar_Set( "g_spSkill", "1" );
+	}
+	else if ( configuredSkill > 5.0f ) {
+		trap_Cvar_Set( "g_spSkill", "5" );
+	}
+	return skill;
+}
+
+[[nodiscard]] static const char *InfoValueOrDefault( const char *info, const char *key, const char *fallback ) {
+	const char *value = Info_ValueForKey( info, key );
+	return *value ? value : fallback;
+}
+
+template <std::size_t Size>
+static void CopyInfoValueOrDefault( std::array<char, Size> &buffer, const char *info, const char *key, const char *fallback ) {
+	Q_strncpyz( buffer.data(), InfoValueOrDefault( info, key, fallback ), static_cast<int>( buffer.size() ) );
+}
+
+float trap_Cvar_VariableValue( const char *var_name ) {
+	std::array<char, 128> buffer{};
+
+	trap_Cvar_VariableStringBuffer( var_name, buffer.data(), static_cast<int>( buffer.size() ) );
+	return atof( buffer.data() );
 }
 
 
@@ -47,11 +128,11 @@ float trap_Cvar_VariableValue( const char *var_name ) {
 G_ParseInfos
 ===============
 */
-int G_ParseInfos( char *buf, int max, char *infos[] ) {
+int G_ParseInfos( char *buf, const std::span<char *> infos ) {
 	char	*token;
 	int		count;
-	char	key[MAX_TOKEN_CHARS];
-	char	info[MAX_INFO_STRING];
+	std::array<char, MAX_TOKEN_CHARS> key{};
+	std::array<char, MAX_INFO_STRING> info{};
 
 	count = 0;
 
@@ -65,7 +146,7 @@ int G_ParseInfos( char *buf, int max, char *infos[] ) {
 			break;
 		}
 
-		if ( count == max ) {
+		if ( count == static_cast<int>( infos.size() ) ) {
 			Com_Printf( "Max infos exceeded\n" );
 			break;
 		}
@@ -80,18 +161,15 @@ int G_ParseInfos( char *buf, int max, char *infos[] ) {
 			if ( !strcmp( token, "}" ) ) {
 				break;
 			}
-			Q_strncpyz( key, token, sizeof( key ) );
+			Q_strncpyz( key.data(), token, static_cast<int>( key.size() ) );
 
 			token = COM_ParseExt( &buf, qfalse );
-			if ( !token[0] ) {
-				strcpy( token, "<NULL>" );
-			}
-			Info_SetValueForKey( info, key, token );
+			Info_SetValueForKey( info.data(), key.data(), token[0] ? token : "<NULL>" );
 		}
 		//NOTE: extra space for arena number
-		infos[count] = G_Alloc(strlen(info) + strlen("\\num\\") + strlen(va("%d", MAX_ARENAS)) + 1);
-		if (infos[count]) {
-			strcpy(infos[count], info);
+		infos[count] = G_Alloc( strlen( info.data() ) + strlen( "\\num\\" ) + strlen( va( "%d", MAX_ARENAS ) ) + 1 );
+		if ( infos[count] ) {
+			strcpy( infos[count], info.data() );
 			count++;
 		}
 	}
@@ -105,26 +183,12 @@ G_LoadArenasFromFile
 ===============
 */
 static void G_LoadArenasFromFile( const char *filename ) {
-	int				len;
-	fileHandle_t	f;
-	char			buf[MAX_ARENAS_TEXT];
-
-	len = trap_FS_FOpenFile( filename, &f, FS_READ );
-	if ( f == FS_INVALID_HANDLE ) {
-		trap_Print( va( S_COLOR_RED "file not found: %s\n", filename ) );
-		return;
-	}
-	if ( len >= MAX_ARENAS_TEXT ) {
-		trap_Print( va( S_COLOR_RED "file too large: %s is %i, max allowed is %i", filename, len, MAX_ARENAS_TEXT ) );
-		trap_FS_FCloseFile( f );
+	std::array<char, MAX_ARENAS_TEXT + 1> buffer{};
+	if ( !ReadTextFile( filename, buffer ) ) {
 		return;
 	}
 
-	trap_FS_Read( buf, len, f );
-	buf[len] = 0;
-	trap_FS_FCloseFile( f );
-
-	g_numArenas += G_ParseInfos( buf, MAX_ARENAS - g_numArenas, &g_arenaInfos[g_numArenas] );
+	g_numArenas += G_ParseInfos( buffer.data(), RemainingInfoSlots( g_arenaInfos, g_numArenas ) );
 }
 
 
@@ -136,8 +200,8 @@ G_LoadArenas
 static void G_LoadArenas( void ) {
 	int			numdirs;
 	vmCvar_t	arenasFile;
-	char		filename[128];
-	char		dirlist[1024];
+	std::array<char, 128> filename{};
+	std::array<char, 1024> dirlist{};
 	char*		dirptr;
 	int			i, n;
 	int			dirlen;
@@ -153,13 +217,12 @@ static void G_LoadArenas( void ) {
 	}
 
 	// get all arenas from .arena files
-	numdirs = trap_FS_GetFileList( "scripts", ".arena", dirlist, sizeof( dirlist ) );
-	dirptr  = dirlist;
+	numdirs = trap_FS_GetFileList( "scripts", ".arena", dirlist.data(), static_cast<int>( dirlist.size() ) );
+	dirptr  = dirlist.data();
 	for (i = 0; i < numdirs; i++, dirptr += dirlen+1) {
 		dirlen = (int)strlen(dirptr);
-		strcpy(filename, "scripts/");
-		strcat(filename, dirptr);
-		G_LoadArenasFromFile(filename);
+		BuildScriptPath( filename, dirptr );
+		G_LoadArenasFromFile( filename.data() );
 	}
 	trap_Print( va( "%i arenas parsed\n", g_numArenas ) );
 	
@@ -183,7 +246,7 @@ const char *G_GetArenaInfoByMap( const char *map ) {
 		}
 	}
 
-	return NULL;
+	return nullptr;
 }
 
 
@@ -193,20 +256,20 @@ PlayerIntroSound
 =================
 */
 static void PlayerIntroSound( const char *modelAndSkin ) {
-	char	model[MAX_QPATH];
+	std::array<char, MAX_QPATH> model{};
 	char	*skin;
 
-	Q_strncpyz( model, modelAndSkin, sizeof(model) );
-	skin = Q_strrchr( model, '/' );
+	Q_strncpyz( model.data(), modelAndSkin, static_cast<int>( model.size() ) );
+	skin = Q_strrchr( model.data(), '/' );
 	if ( skin ) {
 		*skin++ = '\0';
 	}
 	else {
-		skin = model;
+		skin = model.data();
 	}
 
 	if( Q_stricmp( skin, "default" ) == 0 ) {
-		skin = model;
+		skin = model.data();
 	}
 
 	trap_SendConsoleCommand( EXEC_APPEND, va( "play sound/player/announce/%s.wav\n", skin ) );
@@ -256,7 +319,7 @@ void G_AddRandomBot( team_t team ) {
 		if ( *skillstr )
 			skill = atof( skillstr );
 		else
-			skill = trap_Cvar_VariableValue( "g_spSkill" );
+			skill = ConfiguredSinglePlayerBotSkill();
 
 		for ( i = 0 ; i < level.maxclients ; i++ ) {
 			cl = level.clients + i;
@@ -469,24 +532,23 @@ G_CheckBotSpawn
 ===============
 */
 void G_CheckBotSpawn( void ) {
-	int		n;
-	char	userinfo[MAX_INFO_VALUE];
+	std::array<char, MAX_INFO_VALUE> userinfo{};
 
 	G_CheckMinimumPlayers();
 
-	for( n = 0; n < BOT_SPAWN_QUEUE_DEPTH; n++ ) {
-		if( !botSpawnQueue[n].spawnTime ) {
+	for ( botSpawnQueue_t &queuedBot : BotSpawnQueueEntries() ) {
+		if ( !queuedBot.spawnTime ) {
 			continue;
 		}
-		if ( botSpawnQueue[n].spawnTime > level.time ) {
+		if ( queuedBot.spawnTime > level.time ) {
 			continue;
 		}
-		ClientBegin( botSpawnQueue[n].clientNum );
-		botSpawnQueue[n].spawnTime = 0;
+		ClientBegin( queuedBot.clientNum );
+		queuedBot.spawnTime = 0;
 
 		if( g_gametype.integer == GT_SINGLE_PLAYER ) {
-			trap_GetUserinfo( botSpawnQueue[n].clientNum, userinfo, sizeof(userinfo) );
-			PlayerIntroSound( Info_ValueForKey (userinfo, "model") );
+			trap_GetUserinfo( queuedBot.clientNum, userinfo.data(), static_cast<int>( userinfo.size() ) );
+			PlayerIntroSound( Info_ValueForKey( userinfo.data(), "model" ) );
 		}
 	}
 }
@@ -498,14 +560,10 @@ AddBotToSpawnQueue
 ===============
 */
 static void AddBotToSpawnQueue( int clientNum, int delay ) {
-	int		n;
-
-	for( n = 0; n < BOT_SPAWN_QUEUE_DEPTH; n++ ) {
-		if( !botSpawnQueue[n].spawnTime ) {
-			botSpawnQueue[n].spawnTime = level.time + delay;
-			botSpawnQueue[n].clientNum = clientNum;
-			return;
-		}
+	if ( botSpawnQueue_t *slot = FindFreeBotSpawnSlot(); slot != nullptr ) {
+		slot->spawnTime = level.time + delay;
+		slot->clientNum = clientNum;
+		return;
 	}
 
 	G_Printf( S_COLOR_YELLOW "Unable to delay bot spawn\n" );
@@ -523,13 +581,8 @@ doesn't happen on a freed index
 ===============
 */
 void G_RemoveQueuedBotBegin( int clientNum ) {
-	int		n;
-
-	for( n = 0; n < BOT_SPAWN_QUEUE_DEPTH; n++ ) {
-		if( botSpawnQueue[n].clientNum == clientNum ) {
-			botSpawnQueue[n].spawnTime = 0;
-			return;
-		}
+	if ( botSpawnQueue_t *slot = FindQueuedBotSpawnSlot( clientNum ); slot != nullptr ) {
+		slot->spawnTime = 0;
 	}
 }
 
@@ -541,13 +594,13 @@ G_BotConnect
 */
 qboolean G_BotConnect( int clientNum, qboolean restart ) {
 	bot_settings_t	settings;
-	char			userinfo[MAX_INFO_STRING];
+	std::array<char, MAX_INFO_STRING> userinfo{};
 
-	trap_GetUserinfo( clientNum, userinfo, sizeof(userinfo) );
+	trap_GetUserinfo( clientNum, userinfo.data(), static_cast<int>( userinfo.size() ) );
 
-	Q_strncpyz( settings.characterfile, Info_ValueForKey( userinfo, "characterfile" ), sizeof(settings.characterfile) );
-	settings.skill = atof( Info_ValueForKey( userinfo, "skill" ) );
-	Q_strncpyz( settings.team, Info_ValueForKey( userinfo, "team" ), sizeof(settings.team) );
+	Q_strncpyz( settings.characterfile, Info_ValueForKey( userinfo.data(), "characterfile" ), sizeof(settings.characterfile) );
+	settings.skill = atof( Info_ValueForKey( userinfo.data(), "skill" ) );
+	Q_strncpyz( settings.team, Info_ValueForKey( userinfo.data(), "team" ), sizeof(settings.team) );
 
 	if (!BotAISetupClient( clientNum, &settings, restart )) {
 		trap_DropClient( clientNum, "BotAISetupClient failed" );
@@ -566,14 +619,12 @@ G_AddBot
 static void G_AddBot( const char *name, float skill, const char *team, int delay, const char *altname ) {
 	int				clientNum;
 	char			*botinfo;
-	gentity_t		*bot;
-	char			*key;
-	char			*s;
 	const char		*botname;
 	const char		*model;
 	const char		*headmodel;
-	char			userinfo[MAX_INFO_STRING];
-	char			nm[MAX_CVAR_VALUE_STRING];
+	const char		*aifile;
+	std::array<char, MAX_INFO_STRING> userinfo{};
+	std::array<char, MAX_CVAR_VALUE_STRING> nm{};
 
 	// get the botinfo from bots.txt
 	botinfo = G_GetBotInfoByName( name );
@@ -594,64 +645,41 @@ static void G_AddBot( const char *name, float skill, const char *team, int delay
 		botname = altname;
 	}
 
-	BG_CleanName( botname, nm, sizeof( nm ), "unnamed bot" );
-	Info_SetValueForKey( userinfo, "name", nm );
+	BG_CleanName( botname, nm.data(), static_cast<int>( nm.size() ), "unnamed bot" );
+	Info_SetValueForKey( userinfo.data(), "name", nm.data() );
 
-	Info_SetValueForKey( userinfo, "rate", "25000" );
-	Info_SetValueForKey( userinfo, "snaps", va( "%i", sv_fps.integer ) );
-	Info_SetValueForKey( userinfo, "skill", va("%1.2f", skill) );
+	Info_SetValueForKey( userinfo.data(), "rate", "25000" );
+	Info_SetValueForKey( userinfo.data(), "snaps", va( "%i", sv_fps.integer ) );
+	Info_SetValueForKey( userinfo.data(), "skill", va("%1.2f", skill) );
 
 	if ( skill >= 1 && skill < 2 ) {
-		Info_SetValueForKey( userinfo, "handicap", "50" );
+		Info_SetValueForKey( userinfo.data(), "handicap", "50" );
 	}
 	else if ( skill >= 2 && skill < 3 ) {
-		Info_SetValueForKey( userinfo, "handicap", "70" );
+		Info_SetValueForKey( userinfo.data(), "handicap", "70" );
 	}
 	else if ( skill >= 3 && skill < 4 ) {
-		Info_SetValueForKey( userinfo, "handicap", "90" );
+		Info_SetValueForKey( userinfo.data(), "handicap", "90" );
 	}
 
-	key = "model";
-	model = Info_ValueForKey( botinfo, key );
-	if ( !*model ) {
-		model = "visor/default";
-	}
-	Info_SetValueForKey( userinfo, key, model );
+	model = InfoValueOrDefault( botinfo, "model", "visor/default" );
+	Info_SetValueForKey( userinfo.data(), "model", model );
 	//key = "team_model";
 	//Info_SetValueForKey( userinfo, key, model );
 
-	key = "headmodel";
-	headmodel = Info_ValueForKey( botinfo, key );
-	if ( !*headmodel ) {
-		headmodel = model;
-	}
-	Info_SetValueForKey( userinfo, key, headmodel );
+	headmodel = InfoValueOrDefault( botinfo, "headmodel", model );
+	Info_SetValueForKey( userinfo.data(), "headmodel", headmodel );
 	//key = "team_headmodel";
 	//Info_SetValueForKey( userinfo, key, headmodel );
 
-	key = "gender";
-	s = Info_ValueForKey( botinfo, key );
-	if ( !*s ) {
-		s = "male";
-	}
-	Info_SetValueForKey( userinfo, "sex", s );
+	Info_SetValueForKey( userinfo.data(), "sex", InfoValueOrDefault( botinfo, "gender", "male" ) );
 
-	key = "color1";
-	s = Info_ValueForKey( botinfo, key );
-	if ( !*s ) {
-		s = "4";
-	}
-	Info_SetValueForKey( userinfo, key, s );
+	Info_SetValueForKey( userinfo.data(), "color1", InfoValueOrDefault( botinfo, "color1", "4" ) );
 
-	key = "color2";
-	s = Info_ValueForKey( botinfo, key );
-	if ( !*s ) {
-		s = "5";
-	}
-	Info_SetValueForKey( userinfo, key, s );
+	Info_SetValueForKey( userinfo.data(), "color2", InfoValueOrDefault( botinfo, "color2", "5" ) );
 
-	s = Info_ValueForKey(botinfo, "aifile");
-	if (!*s ) {
+	aifile = Info_ValueForKey( botinfo, "aifile" );
+	if (!*aifile ) {
 		trap_Print( S_COLOR_RED "Error: bot has no aifile specified\n" );
 		return;
 	}
@@ -670,16 +698,16 @@ static void G_AddBot( const char *name, float skill, const char *team, int delay
 		ClientDisconnect( clientNum );
 	}
 
-	Info_SetValueForKey( userinfo, "characterfile", Info_ValueForKey( botinfo, "aifile" ) );
-	Info_SetValueForKey( userinfo, "skill", va( "%1.2f", skill ) );
-	Info_SetValueForKey( userinfo, "team", team );
+	Info_SetValueForKey( userinfo.data(), "characterfile", aifile );
+	Info_SetValueForKey( userinfo.data(), "skill", va( "%1.2f", skill ) );
+	Info_SetValueForKey( userinfo.data(), "team", team );
 
-	bot = &g_entities[ clientNum ];
+	gentity_t *bot = &g_entities[ clientNum ];
 	bot->r.svFlags |= SVF_BOT;
 	bot->inuse = qtrue;
 
 	// register the userinfo
-	trap_SetUserinfo( clientNum, userinfo );
+	trap_SetUserinfo( clientNum, userinfo.data() );
 
 	// have it connect to the game as a normal client
 	if ( ClientConnect( clientNum, qtrue, qtrue ) ) {
@@ -703,10 +731,10 @@ Svcmd_AddBot_f
 void Svcmd_AddBot_f( void ) {
 	float			skill;
 	int				delay;
-	char			name[MAX_TOKEN_CHARS];
-	char			altname[MAX_TOKEN_CHARS];
-	char			string[MAX_TOKEN_CHARS];
-	char			team[MAX_TOKEN_CHARS];
+	std::array<char, MAX_TOKEN_CHARS> name{};
+	std::array<char, MAX_TOKEN_CHARS> altname{};
+	std::array<char, MAX_TOKEN_CHARS> string{};
+	std::array<char, MAX_TOKEN_CHARS> team{};
 
 	// are bots enabled?
 	if ( !trap_Cvar_VariableIntegerValue( "bot_enable" ) ) {
@@ -714,41 +742,37 @@ void Svcmd_AddBot_f( void ) {
 	}
 
 	// name
-	trap_Argv( 1, name, sizeof( name ) );
+	trap_Argv( 1, name.data(), static_cast<int>( name.size() ) );
 	if ( !name[0] ) {
 		trap_Print( "Usage: Addbot <botname> [skill 1-5] [team] [msec delay] [altname]\n" );
 		return;
 	}
 
 	// skill
-	trap_Argv( 2, string, sizeof( string ) );
+	trap_Argv( 2, string.data(), static_cast<int>( string.size() ) );
 	if ( !string[0] ) {
 		skill = 4;
 	}
 	else {
-		skill = atof( string );
-		if ( skill < 1 )
-			skill = 1;
-		else if ( skill > 5 )
-			skill = 5;
+		skill = ClampBotSkill( atof( string.data() ) );
 	}
 
 	// team
-	trap_Argv( 3, team, sizeof( team ) );
+	trap_Argv( 3, team.data(), static_cast<int>( team.size() ) );
 
 	// delay
-	trap_Argv( 4, string, sizeof( string ) );
+	trap_Argv( 4, string.data(), static_cast<int>( string.size() ) );
 	if ( !string[0] ) {
 		delay = 0;
 	}
 	else {
-		delay = atoi( string );
+		delay = atoi( string.data() );
 	}
 
 	// alternative name
-	trap_Argv( 5, altname, sizeof( altname ) );
+	trap_Argv( 5, altname.data(), static_cast<int>( altname.size() ) );
 
-	G_AddBot( name, skill, team, delay, altname );
+	G_AddBot( name.data(), skill, team.data(), delay, altname.data() );
 
 	// if this was issued during gameplay and we are playing locally,
 	// go ahead and load the bot's media immediately
@@ -765,30 +789,18 @@ Svcmd_BotList_f
 */
 void Svcmd_BotList_f( void ) {
 	int i;
-	char name[MAX_NETNAME];
-	char funname[MAX_NETNAME];
-	char model[MAX_QPATH];
-	char aifile[MAX_QPATH];
+	std::array<char, MAX_NETNAME> name{};
+	std::array<char, MAX_NETNAME> funname{};
+	std::array<char, MAX_QPATH> model{};
+	std::array<char, MAX_QPATH> aifile{};
 
 	trap_Print( S_COLOR_RED "name             model            aifile              funname\n" );
 	for ( i = 0; i < g_numBots; i++ ) {
-		Q_strncpyz( name, Info_ValueForKey( g_botInfos[i], "name" ), sizeof( name ) );
-		if ( !*name ) {
-			strcpy(name, "UnnamedPlayer");
-		}
-		Q_strncpyz( funname, Info_ValueForKey( g_botInfos[i], "funname" ), sizeof( funname ) );
-		if ( !*funname ) {
-			strcpy( funname, "" );
-		}
-		Q_strncpyz( model, Info_ValueForKey( g_botInfos[i], "model" ), sizeof( model ) );
-		if ( !*model ) {
-			strcpy( model, "visor/default" );
-		}
-		Q_strncpyz( aifile, Info_ValueForKey( g_botInfos[i], "aifile" ), sizeof( aifile ) );
-		if ( !*aifile ) {
-			strcpy( aifile, "bots/default_c.c" );
-		}
-		trap_Print( va( "%-16s %-16s %-20s %-20s\n", name, model, aifile, funname ) );
+		CopyInfoValueOrDefault( name, g_botInfos[i], "name", "UnnamedPlayer" );
+		CopyInfoValueOrDefault( funname, g_botInfos[i], "funname", "" );
+		CopyInfoValueOrDefault( model, g_botInfos[i], "model", "visor/default" );
+		CopyInfoValueOrDefault( aifile, g_botInfos[i], "aifile", "bots/default_c.c" );
+		trap_Print( va( "%-16s %-16s %-20s %-20s\n", name.data(), model.data(), aifile.data(), funname.data() ) );
 	}
 }
 
@@ -803,24 +815,16 @@ static void G_SpawnBots( const char *botList, int baseDelay ) {
 	char		*p;
 	float		skill;
 	int			delay;
-	char		bots[MAX_INFO_VALUE];
+	std::array<char, MAX_INFO_VALUE> bots{};
 
-	podium1 = NULL;
-	podium2 = NULL;
-	podium3 = NULL;
+	podium1 = nullptr;
+	podium2 = nullptr;
+	podium3 = nullptr;
 
-	skill = trap_Cvar_VariableValue( "g_spSkill" );
-	if( skill < 1 ) {
-		trap_Cvar_Set( "g_spSkill", "1" );
-		skill = 1;
-	}
-	else if ( skill > 5 ) {
-		trap_Cvar_Set( "g_spSkill", "5" );
-		skill = 5;
-	}
+	skill = ConfiguredSinglePlayerBotSkill();
 
-	Q_strncpyz( bots, botList, sizeof( bots ) );
-	p = &bots[0];
+	Q_strncpyz( bots.data(), botList, static_cast<int>( bots.size() ) );
+	p = bots.data();
 	delay = baseDelay;
 	while( *p ) {
 		//skip spaces
@@ -857,26 +861,12 @@ G_LoadBotsFromFile
 ===============
 */
 static void G_LoadBotsFromFile( const char *filename ) {
-	int				len;
-	fileHandle_t	f;
-	char			buf[MAX_BOTS_TEXT];
-
-	len = trap_FS_FOpenFile( filename, &f, FS_READ );
-	if ( f == FS_INVALID_HANDLE ) {
-		trap_Print( va( S_COLOR_RED "file not found: %s\n", filename ) );
-		return;
-	}
-	if ( len >= MAX_BOTS_TEXT ) {
-		trap_Print( va( S_COLOR_RED "file too large: %s is %i, max allowed is %i\n", filename, len, MAX_BOTS_TEXT ) );
-		trap_FS_FCloseFile( f );
+	std::array<char, MAX_BOTS_TEXT + 1> buffer{};
+	if ( !ReadTextFile( filename, buffer ) ) {
 		return;
 	}
 
-	trap_FS_Read( buf, len, f );
-	trap_FS_FCloseFile( f );
-	buf[ len ] = '\0';
-
-	g_numBots += G_ParseInfos( buf, MAX_BOTS - g_numBots, &g_botInfos[g_numBots] );
+	g_numBots += G_ParseInfos( buffer.data(), RemainingInfoSlots( g_botInfos, g_numBots ) );
 }
 
 
@@ -888,8 +878,8 @@ G_LoadBots
 static void G_LoadBots( void ) {
 	vmCvar_t	botsFile;
 	int			numdirs;
-	char		filename[128];
-	char		dirlist[1024];
+	std::array<char, 128> filename{};
+	std::array<char, 1024> dirlist{};
 	char*		dirptr;
 	int			i;
 	int			dirlen;
@@ -909,13 +899,12 @@ static void G_LoadBots( void ) {
 	}
 
 	// get all bots from .bot files
-	numdirs = trap_FS_GetFileList( "scripts", ".bot", dirlist, sizeof( dirlist ) );
-	dirptr  = dirlist;
+	numdirs = trap_FS_GetFileList( "scripts", ".bot", dirlist.data(), static_cast<int>( dirlist.size() ) );
+	dirptr  = dirlist.data();
 	for (i = 0; i < numdirs; i++, dirptr += dirlen+1) {
 		dirlen = (int)strlen(dirptr);
-		strcpy(filename, "scripts/");
-		strcat(filename, dirptr);
-		G_LoadBotsFromFile(filename);
+		BuildScriptPath( filename, dirptr );
+		G_LoadBotsFromFile( filename.data() );
 	}
 	trap_Print( va( "%i bots parsed\n", g_numBots ) );
 }
@@ -930,7 +919,7 @@ G_GetBotInfoByNumber
 char *G_GetBotInfoByNumber( int num ) {
 	if( num < 0 || num >= g_numBots ) {
 		trap_Print( va( S_COLOR_RED "Invalid bot number: %i\n", num ) );
-		return NULL;
+		return nullptr;
 	}
 	return g_botInfos[num];
 }
@@ -952,7 +941,7 @@ char *G_GetBotInfoByName( const char *name ) {
 		}
 	}
 
-	return NULL;
+	return nullptr;
 }
 
 

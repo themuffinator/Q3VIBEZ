@@ -15,9 +15,7 @@ void dllEntry( int (QDECL *syscallptr)( int arg,... ) ) {
 }
 
 int PASSFLOAT( float x ) {
-	float	floatTemp;
-	floatTemp = x;
-	return *(int *)&floatTemp;
+	return Q_FloatAsInt( x );
 }
 
 void trap_Print( const char *string ) {
@@ -47,7 +45,7 @@ void trap_Cvar_Set( const char *var_name, const char *value ) {
 float trap_Cvar_VariableValue( const char *var_name ) {
 	int temp;
 	temp = syscall( UI_CVAR_VARIABLEVALUE, var_name );
-	return (*(float*)&temp);
+	return Q_IntAsFloat( temp );
 }
 
 void trap_Cvar_VariableStringBuffer( const char *var_name, char *buffer, int bufsize ) {

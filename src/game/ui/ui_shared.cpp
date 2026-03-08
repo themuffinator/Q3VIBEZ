@@ -5221,9 +5221,11 @@ qboolean MenuParse_name( itemDef_t *item, int handle ) {
 
 qboolean MenuParse_fullscreen( itemDef_t *item, int handle ) {
 	menuDef_t *menu = (menuDef_t*)item;
-	if (!PC_Int_Parse(handle, (int*) &menu->fullScreen)) { // bk001206 - cast qboolean
+	int fullscreen = menu->fullScreen;
+	if ( !PC_Int_Parse( handle, &fullscreen ) ) {
 		return qfalse;
 	}
+	menu->fullScreen = Q_FromBool( fullscreen != 0 );
 	return qtrue;
 }
 

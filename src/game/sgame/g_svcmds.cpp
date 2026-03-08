@@ -5,6 +5,10 @@
 
 #include "g_local.h"
 
+#include <array>
+#include <bit>
+#include <cctype>
+
 
 /*
 ==============================================================================
@@ -50,6 +54,67 @@ typedef struct ipFilter_s
 static ipFilter_t	ipFilters[MAX_IPFILTERS];
 static int			numIPFilters;
 
+namespace {
+
+using IpOctets = std::array<byte, 4>;
+
+static_assert( sizeof( IpOctets ) == sizeof( unsigned ) );
+
+constexpr unsigned InvalidIpFilterCompare = 0xffffffffu;
+
+unsigned PackIpOctets( const IpOctets &octets ) {
+	return std::bit_cast<unsigned>( octets );
+}
+
+IpOctets UnpackIpOctets( const unsigned value ) {
+	return std::bit_cast<IpOctets>( value );
+}
+
+bool IsDigitChar( const char value ) {
+	return std::isdigit( static_cast<unsigned char>( value ) ) != 0;
+}
+
+bool IsFreeIpFilterSlot( const ipFilter_t &filter ) {
+	return filter.compare == InvalidIpFilterCompare;
+}
+
+const char *EntityTypeName( const int type ) {
+	switch ( type ) {
+	case ET_GENERAL:
+		return "ET_GENERAL          ";
+	case ET_PLAYER:
+		return "ET_PLAYER           ";
+	case ET_ITEM:
+		return "ET_ITEM             ";
+	case ET_MISSILE:
+		return "ET_MISSILE          ";
+	case ET_MOVER:
+		return "ET_MOVER            ";
+	case ET_BEAM:
+		return "ET_BEAM             ";
+	case ET_PORTAL:
+		return "ET_PORTAL           ";
+	case ET_SPEAKER:
+		return "ET_SPEAKER          ";
+	case ET_PUSH_TRIGGER:
+		return "ET_PUSH_TRIGGER     ";
+	case ET_TELEPORT_TRIGGER:
+		return "ET_TELEPORT_TRIGGER ";
+	case ET_INVISIBLE:
+		return "ET_INVISIBLE        ";
+	case ET_GRAPPLE:
+		return "ET_GRAPPLE          ";
+	default:
+		return nullptr;
+	}
+}
+
+bool IsConnectedClient( const gclient_t &client ) {
+	return client.pers.connected != CON_DISCONNECTED;
+}
+
+} // namespace
+
 /*
 =================
 StringToFilter
@@ -57,20 +122,14 @@ StringToFilter
 */
 static qboolean StringToFilter (char *s, ipFilter_t *f)
 {
-	char	num[128];
+	std::array<char, 128> num{};
 	int		i, j;
-	byte	b[4];
-	byte	m[4];
+	IpOctets	b{};
+	IpOctets	m{};
 	
 	for (i=0 ; i<4 ; i++)
 	{
-		b[i] = 0;
-		m[i] = 0;
-	}
-	
-	for (i=0 ; i<4 ; i++)
-	{
-		if (*s < '0' || *s > '9')
+		if ( !IsDigitChar( *s ) )
 		{
 			if (*s == '*') // 'match any'
 			{
@@ -86,12 +145,12 @@ static qboolean StringToFilter (char *s, ipFilter_t *f)
 		}
 		
 		j = 0;
-		while (*s >= '0' && *s <= '9')
+		while ( IsDigitChar( *s ) )
 		{
 			num[j++] = *s++;
 		}
-		num[j] = 0;
-		b[i] = atoi(num);
+		num[j] = '\0';
+		b[i] = atoi( num.data() );
 		m[i] = 255;
 
 		if (!*s)
@@ -99,8 +158,8 @@ static qboolean StringToFilter (char *s, ipFilter_t *f)
 		s++;
 	}
 	
-	f->mask = *(unsigned *)m;
-	f->compare = *(unsigned *)b;
+	f->mask = PackIpOctets( m );
+	f->compare = PackIpOctets( b );
 	
 	return qtrue;
 }
@@ -112,32 +171,31 @@ UpdateIPBans
 */
 static void UpdateIPBans (void)
 {
-	byte	b[4];
-	byte	m[4];
+	IpOctets	b{};
+	IpOctets	m{};
 	int		i,j;
-	char	iplist_final[MAX_CVAR_VALUE_STRING];
-	char	ip[64];
+	std::array<char, MAX_CVAR_VALUE_STRING> iplist_final{};
+	std::array<char, 64> ip{};
 
-	*iplist_final = 0;
 	for (i = 0 ; i < numIPFilters ; i++)
 	{
-		if (ipFilters[i].compare == 0xffffffff)
+		if ( IsFreeIpFilterSlot( ipFilters[i] ) )
 			continue;
 
-		*(unsigned *)b = ipFilters[i].compare;
-		*(unsigned *)m = ipFilters[i].mask;
-		*ip = 0;
+		b = UnpackIpOctets( ipFilters[i].compare );
+		m = UnpackIpOctets( ipFilters[i].mask );
+		ip[0] = '\0';
 		for (j = 0 ; j < 4 ; j++)
 		{
 			if (m[j]!=255)
-				Q_strcat(ip, sizeof(ip), "*");
+				Q_strcat( ip.data(), ip.size(), "*" );
 			else
-				Q_strcat(ip, sizeof(ip), va("%i", b[j]));
-			Q_strcat(ip, sizeof(ip), (j<3) ? "." : " ");
+				Q_strcat( ip.data(), ip.size(), va("%i", b[j]) );
+			Q_strcat( ip.data(), ip.size(), (j<3) ? "." : " " );
 		}		
-		if (strlen(iplist_final)+strlen(ip) < MAX_CVAR_VALUE_STRING)
+		if ( strlen( iplist_final.data() ) + strlen( ip.data() ) < MAX_CVAR_VALUE_STRING )
 		{
-			Q_strcat( iplist_final, sizeof(iplist_final), ip);
+			Q_strcat( iplist_final.data(), iplist_final.size(), ip.data() );
 		}
 		else
 		{
@@ -146,7 +204,7 @@ static void UpdateIPBans (void)
 		}
 	}
 
-	trap_Cvar_Set( "g_banIPs", iplist_final );
+	trap_Cvar_Set( "g_banIPs", iplist_final.data() );
 }
 
 /*
@@ -158,14 +216,13 @@ qboolean G_FilterPacket (char *from)
 {
 	int		i;
 	unsigned	in;
-	byte m[4];
+	IpOctets m{};
 	char *p;
 
 	i = 0;
 	p = from;
 	while (*p && i < 4) {
-		m[i] = 0;
-		while (*p >= '0' && *p <= '9') {
+		while ( IsDigitChar( *p ) ) {
 			m[i] = m[i]*10 + (*p - '0');
 			p++;
 		}
@@ -174,7 +231,7 @@ qboolean G_FilterPacket (char *from)
 		i++, p++;
 	}
 	
-	in = *(unsigned *)m;
+	in = PackIpOctets( m );
 
 	for (i=0 ; i<numIPFilters ; i++)
 		if ( (in & ipFilters[i].mask) == ipFilters[i].compare)
@@ -193,7 +250,7 @@ static void AddIP( char *str )
 	int		i;
 
 	for (i = 0 ; i < numIPFilters ; i++)
-		if (ipFilters[i].compare == 0xffffffff)
+		if ( IsFreeIpFilterSlot( ipFilters[i] ) )
 			break;		// free spot
 	if (i == numIPFilters)
 	{
@@ -206,7 +263,7 @@ static void AddIP( char *str )
 	}
 	
 	if (!StringToFilter (str, &ipFilters[i]))
-		ipFilters[i].compare = 0xffffffffu;
+		ipFilters[i].compare = InvalidIpFilterCompare;
 
 	UpdateIPBans();
 }
@@ -219,11 +276,11 @@ G_ProcessIPBans
 void G_ProcessIPBans(void) 
 {
 	char *s, *t;
-	char		str[MAX_CVAR_VALUE_STRING];
+	std::array<char, MAX_CVAR_VALUE_STRING> str{};
 
-	Q_strncpyz( str, g_banIPs.string, sizeof(str) );
+	Q_strncpyz( str.data(), g_banIPs.string, str.size() );
 
-	for (t = s = g_banIPs.string; *t; /* */ ) {
+	for (t = s = str.data(); *t; /* */ ) {
 		s = strchr(s, ' ');
 		if (!s)
 			break;
@@ -243,16 +300,16 @@ Svcmd_AddIP_f
 */
 void Svcmd_AddIP_f (void)
 {
-	char		str[MAX_TOKEN_CHARS];
+	std::array<char, MAX_TOKEN_CHARS> str{};
 
 	if ( trap_Argc() < 2 ) {
 		G_Printf("Usage:  addip <ip-mask>\n");
 		return;
 	}
 
-	trap_Argv( 1, str, sizeof( str ) );
+	trap_Argv( 1, str.data(), str.size() );
 
-	AddIP( str );
+	AddIP( str.data() );
 
 }
 
@@ -265,22 +322,22 @@ void Svcmd_RemoveIP_f (void)
 {
 	ipFilter_t	f;
 	int			i;
-	char		str[MAX_TOKEN_CHARS];
+	std::array<char, MAX_TOKEN_CHARS> str{};
 
 	if ( trap_Argc() < 2 ) {
 		G_Printf("Usage:  sv removeip <ip-mask>\n");
 		return;
 	}
 
-	trap_Argv( 1, str, sizeof( str ) );
+	trap_Argv( 1, str.data(), str.size() );
 
-	if (!StringToFilter (str, &f))
+	if (!StringToFilter (str.data(), &f))
 		return;
 
 	for (i=0 ; i<numIPFilters ; i++) {
 		if (ipFilters[i].mask == f.mask	&&
 			ipFilters[i].compare == f.compare) {
-			ipFilters[i].compare = 0xffffffffu;
+			ipFilters[i].compare = InvalidIpFilterCompare;
 			G_Printf ("Removed.\n");
 
 			UpdateIPBans();
@@ -288,7 +345,7 @@ void Svcmd_RemoveIP_f (void)
 		}
 	}
 
-	G_Printf ( "Didn't find %s.\n", str );
+	G_Printf ( "Didn't find %s.\n", str.data() );
 }
 
 /*
@@ -306,46 +363,10 @@ void	Svcmd_EntityList_f (void) {
 			continue;
 		}
 		G_Printf("%3i:", e);
-		switch ( check->s.eType ) {
-		case ET_GENERAL:
-			G_Printf("ET_GENERAL          ");
-			break;
-		case ET_PLAYER:
-			G_Printf("ET_PLAYER           ");
-			break;
-		case ET_ITEM:
-			G_Printf("ET_ITEM             ");
-			break;
-		case ET_MISSILE:
-			G_Printf("ET_MISSILE          ");
-			break;
-		case ET_MOVER:
-			G_Printf("ET_MOVER            ");
-			break;
-		case ET_BEAM:
-			G_Printf("ET_BEAM             ");
-			break;
-		case ET_PORTAL:
-			G_Printf("ET_PORTAL           ");
-			break;
-		case ET_SPEAKER:
-			G_Printf("ET_SPEAKER          ");
-			break;
-		case ET_PUSH_TRIGGER:
-			G_Printf("ET_PUSH_TRIGGER     ");
-			break;
-		case ET_TELEPORT_TRIGGER:
-			G_Printf("ET_TELEPORT_TRIGGER ");
-			break;
-		case ET_INVISIBLE:
-			G_Printf("ET_INVISIBLE        ");
-			break;
-		case ET_GRAPPLE:
-			G_Printf("ET_GRAPPLE          ");
-			break;
-		default:
+		if ( const char *type_name = EntityTypeName( check->s.eType ) ) {
+			G_Printf( "%s", type_name );
+		} else {
 			G_Printf("%3i                 ", check->s.eType);
-			break;
 		}
 
 		if ( check->classname ) {
@@ -361,7 +382,7 @@ gclient_t	*ClientForString( const char *s ) {
 	int			idnum;
 
 	// numeric values are just slot numbers
-	if ( s[0] >= '0' && s[0] <= '9' ) {
+	if ( IsDigitChar( s[0] ) ) {
 		idnum = atoi( s );
 		if ( idnum < 0 || idnum >= level.maxclients ) {
 			Com_Printf( "Bad client slot: %i\n", idnum );
@@ -369,7 +390,7 @@ gclient_t	*ClientForString( const char *s ) {
 		}
 
 		cl = &level.clients[idnum];
-		if ( cl->pers.connected == CON_DISCONNECTED ) {
+		if ( !IsConnectedClient( *cl ) ) {
 			G_Printf( "Client %i is not connected\n", idnum );
 			return NULL;
 		}
@@ -379,7 +400,7 @@ gclient_t	*ClientForString( const char *s ) {
 	// check for a name match
 	for ( i=0 ; i < level.maxclients ; i++ ) {
 		cl = &level.clients[i];
-		if ( cl->pers.connected == CON_DISCONNECTED ) {
+		if ( !IsConnectedClient( *cl ) ) {
 			continue;
 		}
 		if ( !Q_stricmp( cl->pers.netname, s ) ) {
@@ -401,7 +422,7 @@ forceteam <player> <team>
 */
 void	Svcmd_ForceTeam_f( void ) {
 	gclient_t	*cl;
-	char		str[MAX_TOKEN_CHARS];
+	std::array<char, MAX_TOKEN_CHARS> str{};
 
 	if ( trap_Argc() < 3 ) {
 		G_Printf("Usage: forceteam <player> <team>\n");
@@ -409,34 +430,34 @@ void	Svcmd_ForceTeam_f( void ) {
 	}
 
 	// find the player
-	trap_Argv( 1, str, sizeof( str ) );
-	cl = ClientForString( str );
+	trap_Argv( 1, str.data(), str.size() );
+	cl = ClientForString( str.data() );
 	if ( !cl ) {
 		return;
 	}
 
 	// set the team
-	trap_Argv( 2, str, sizeof( str ) );
-	SetTeam( &g_entities[cl - level.clients], str );
+	trap_Argv( 2, str.data(), str.size() );
+	SetTeam( &g_entities[cl - level.clients], str.data() );
 }
 
 
 void Svcmd_Rotate_f( void ) {
-	char	str[MAX_TOKEN_CHARS];
+	std::array<char, MAX_TOKEN_CHARS> str{};
 
 	if ( trap_Argc() >= 2 ) {
-		trap_Argv( 1, str, sizeof( str ) );
-		if ( atoi( str ) > 0 ) {
-			trap_Cvar_Set( SV_ROTATION, str );
+		trap_Argv( 1, str.data(), str.size() );
+		if ( atoi( str.data() ) > 0 ) {
+			trap_Cvar_Set( SV_ROTATION, str.data() );
 		}
 	}
 
 	if ( !ParseMapRotation() ) {
-		char val[ MAX_CVAR_VALUE_STRING ];
+		std::array<char, MAX_CVAR_VALUE_STRING> val{};
 
-		trap_Cvar_VariableStringBuffer( "nextmap", val, sizeof( val ) );
+		trap_Cvar_VariableStringBuffer( "nextmap", val.data(), val.size() );
 
-		if ( !val[0] || !Q_stricmpn( val, "map_restart ", 12 ) )
+		if ( !val[0] || !Q_stricmpn( val.data(), "map_restart ", 12 ) )
 			G_LoadMap( NULL );
 		else
 			trap_SendConsoleCommand( EXEC_APPEND, "vstr nextmap\n" );
@@ -453,62 +474,62 @@ ConsoleCommand
 =================
 */
 qboolean	ConsoleCommand( void ) {
-	char	cmd[MAX_TOKEN_CHARS];
+	std::array<char, MAX_TOKEN_CHARS> cmd{};
 
-	trap_Argv( 0, cmd, sizeof( cmd ) );
+	trap_Argv( 0, cmd.data(), cmd.size() );
 
-	if ( Q_stricmp (cmd, "entitylist") == 0 ) {
+	if ( Q_stricmp (cmd.data(), "entitylist") == 0 ) {
 		Svcmd_EntityList_f();
 		return qtrue;
 	}
 
-	if ( Q_stricmp (cmd, "forceteam") == 0 ) {
+	if ( Q_stricmp (cmd.data(), "forceteam") == 0 ) {
 		Svcmd_ForceTeam_f();
 		return qtrue;
 	}
 
-	if (Q_stricmp (cmd, "game_memory") == 0) {
+	if (Q_stricmp (cmd.data(), "game_memory") == 0) {
 		Svcmd_GameMem_f();
 		return qtrue;
 	}
 
-	if (Q_stricmp (cmd, "addbot") == 0) {
+	if (Q_stricmp (cmd.data(), "addbot") == 0) {
 		Svcmd_AddBot_f();
 		return qtrue;
 	}
 
-	if (Q_stricmp (cmd, "botlist") == 0) {
+	if (Q_stricmp (cmd.data(), "botlist") == 0) {
 		Svcmd_BotList_f();
 		return qtrue;
 	}
 
-	if (Q_stricmp (cmd, "abort_podium") == 0) {
+	if (Q_stricmp (cmd.data(), "abort_podium") == 0) {
 		Svcmd_AbortPodium_f();
 		return qtrue;
 	}
 
-	if (Q_stricmp (cmd, "addip") == 0) {
+	if (Q_stricmp (cmd.data(), "addip") == 0) {
 		Svcmd_AddIP_f();
 		return qtrue;
 	}
 
-	if (Q_stricmp (cmd, "removeip") == 0) {
+	if (Q_stricmp (cmd.data(), "removeip") == 0) {
 		Svcmd_RemoveIP_f();
 		return qtrue;
 	}
 
-	if (Q_stricmp (cmd, "listip") == 0) {
+	if (Q_stricmp (cmd.data(), "listip") == 0) {
 		trap_SendConsoleCommand( EXEC_NOW, "g_banIPs\n" );
 		return qtrue;
 	}
 
-	if (Q_stricmp (cmd, "rotate") == 0) {
+	if (Q_stricmp (cmd.data(), "rotate") == 0) {
 		Svcmd_Rotate_f();
 		return qtrue;
 	}
 
 	if (g_dedicated.integer) {
-		if (Q_stricmp (cmd, "say") == 0) {
+		if (Q_stricmp (cmd.data(), "say") == 0) {
 			G_BroadcastServerCommand( -1, va("print \"server: %s\"", ConcatArgs(1) ) );
 			return qtrue;
 		}
@@ -519,4 +540,3 @@ qboolean	ConsoleCommand( void ) {
 
 	return qfalse;
 }
-

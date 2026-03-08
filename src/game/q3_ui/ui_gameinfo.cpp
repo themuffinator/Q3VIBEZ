@@ -6,6 +6,9 @@
 
 #include "ui_local.h"
 
+#include <array>
+#include <span>
+
 
 //
 // arena and bot info
@@ -14,16 +17,49 @@
 #define POOLSIZE	128 * 1024
 
 int				ui_numBots;
-static char		*ui_botInfos[MAX_BOTS];
+static std::array<char *, MAX_BOTS> ui_botInfos{};
 
 static int		ui_numArenas;
-static char		*ui_arenaInfos[MAX_ARENAS];
+static std::array<char *, MAX_ARENAS> ui_arenaInfos{};
 
 static int		ui_numSinglePlayerArenas;
 static int		ui_numSpecialSinglePlayerArenas;
 
 static char		memoryPool[POOLSIZE];
 static int		allocPoint, outOfMemory;
+
+template <std::size_t Size>
+[[nodiscard]] static bool ReadTextFile( const char *filename, std::array<char, Size> &buffer ) {
+	fileHandle_t f;
+	const int maxTextSize = static_cast<int>( buffer.size() - 1 );
+	const int len = trap_FS_FOpenFile( filename, &f, FS_READ );
+	if ( f == FS_INVALID_HANDLE ) {
+		trap_Print( va( S_COLOR_RED "file not found: %s\n", filename ) );
+		return false;
+	}
+	if ( len >= maxTextSize ) {
+		trap_Print( va( S_COLOR_RED "file too large: %s is %i, max allowed is %i", filename, len, maxTextSize ) );
+		trap_FS_FCloseFile( f );
+		return false;
+	}
+
+	trap_FS_Read( buffer.data(), len, f );
+	buffer[len] = '\0';
+	trap_FS_FCloseFile( f );
+	return true;
+}
+
+template <std::size_t Size>
+static void BuildScriptPath( std::array<char, Size> &path, const char *filename ) {
+	Q_strncpyz( path.data(), "scripts/", static_cast<int>( path.size() ) );
+	Q_strcat( path.data(), static_cast<int>( path.size() ), filename );
+}
+
+template <std::size_t Size>
+[[nodiscard]] static auto RemainingInfoSlots( std::array<char *, Size> &infos, const int currentCount ) noexcept -> std::span<char *> {
+	const auto currentIndex = static_cast<std::size_t>( currentCount );
+	return std::span{ infos }.subspan( currentIndex, infos.size() - currentIndex );
+}
 
 
 /*
@@ -61,11 +97,11 @@ void UI_InitMemory( void ) {
 UI_ParseInfos
 ===============
 */
-int UI_ParseInfos( char *buf, int max, char *infos[] ) {
+int UI_ParseInfos( char *buf, const std::span<char *> infos ) {
 	char	*token;
 	int		count;
-	char	key[MAX_TOKEN_CHARS];
-	char	info[MAX_INFO_STRING];
+	std::array<char, MAX_TOKEN_CHARS> key{};
+	std::array<char, MAX_INFO_STRING> info{};
 
 	count = 0;
 
@@ -79,7 +115,7 @@ int UI_ParseInfos( char *buf, int max, char *infos[] ) {
 			break;
 		}
 
-		if ( count == max ) {
+		if ( count == static_cast<int>( infos.size() ) ) {
 			Com_Printf( "Max infos exceeded\n" );
 			break;
 		}
@@ -94,18 +130,15 @@ int UI_ParseInfos( char *buf, int max, char *infos[] ) {
 			if ( !strcmp( token, "}" ) ) {
 				break;
 			}
-			Q_strncpyz( key, token, sizeof( key ) );
+			Q_strncpyz( key.data(), token, static_cast<int>( key.size() ) );
 
 			token = COM_ParseExt( &buf, qfalse );
-			if ( !token[0] ) {
-				strcpy( token, "<NULL>" );
-			}
-			Info_SetValueForKey( info, key, token );
+			Info_SetValueForKey( info.data(), key.data(), token[0] ? token : "<NULL>" );
 		}
 		//NOTE: extra space for arena number
-		infos[count] = static_cast<char *>( UI_Alloc(strlen(info) + strlen("\\num\\") + strlen(va("%d", MAX_ARENAS)) + 1) );
+		infos[count] = static_cast<char *>( UI_Alloc( strlen( info.data() ) + strlen("\\num\\") + strlen(va("%d", MAX_ARENAS)) + 1 ) );
 		if (infos[count]) {
-			strcpy(infos[count], info);
+			strcpy( infos[count], info.data() );
 			count++;
 		}
 	}
@@ -118,26 +151,12 @@ UI_LoadArenasFromFile
 ===============
 */
 static void UI_LoadArenasFromFile( const char *filename ) {
-	int				len;
-	fileHandle_t	f;
-	char			buf[MAX_ARENAS_TEXT];
-
-	len = trap_FS_FOpenFile( filename, &f, FS_READ );
-	if ( f == FS_INVALID_HANDLE ) {
-		trap_Print( va( S_COLOR_RED "file not found: %s\n", filename ) );
-		return;
-	}
-	if ( len >= sizeof( buf ) ) {
-		trap_Print( va( S_COLOR_RED "file too large: %s is %i, max allowed is %i", filename, len, sizeof( buf ) ) );
-		trap_FS_FCloseFile( f );
+	std::array<char, MAX_ARENAS_TEXT + 1> buffer{};
+	if ( !ReadTextFile( filename, buffer ) ) {
 		return;
 	}
 
-	trap_FS_Read( buf, len, f );
-	buf[len] = '\0';
-	trap_FS_FCloseFile( f );
-
-	ui_numArenas += UI_ParseInfos( buf, MAX_ARENAS - ui_numArenas, &ui_arenaInfos[ui_numArenas] );
+	ui_numArenas += UI_ParseInfos( buffer.data(), RemainingInfoSlots( ui_arenaInfos, ui_numArenas ) );
 }
 
 
@@ -149,8 +168,8 @@ UI_LoadArenas
 static void UI_LoadArenas( void ) {
 	int			numdirs;
 	vmCvar_t	arenasFile;
-	char		filename[128];
-	char		dirlist[8192];
+	std::array<char, 128> filename{};
+	std::array<char, 8192> dirlist{};
 	char*		dirptr;
 	int			i, n;
 	int			dirlen;
@@ -169,14 +188,13 @@ static void UI_LoadArenas( void ) {
 	}
 
 	// get all arenas from .arena files
-	numdirs = trap_FS_GetFileList( "scripts", ".arena", dirlist, sizeof( dirlist ) );
+	numdirs = trap_FS_GetFileList( "scripts", ".arena", dirlist.data(), static_cast<int>( dirlist.size() ) );
 
-	dirptr  = dirlist;
+	dirptr  = dirlist.data();
 	for (i = 0; i < numdirs; i++, dirptr += dirlen+1) {
 		dirlen = strlen(dirptr);
-		strcpy(filename, "scripts/");
-		strcat(filename, dirptr);
-		UI_LoadArenasFromFile(filename);
+		BuildScriptPath( filename, dirptr );
+		UI_LoadArenasFromFile( filename.data() );
 	}
 	trap_Print( va( "%i arenas parsed\n", ui_numArenas ) );
 	if (outOfMemory) trap_Print(S_COLOR_YELLOW"WARNING: not anough memory in pool to load all arenas\n");
@@ -309,26 +327,12 @@ UI_LoadBotsFromFile
 ===============
 */
 static void UI_LoadBotsFromFile( const char *filename ) {
-	int				len;
-	fileHandle_t	f;
-	char			buf[MAX_BOTS_TEXT];
-
-	len = trap_FS_FOpenFile( filename, &f, FS_READ );
-	if ( f == FS_INVALID_HANDLE ) {
-		trap_Print( va( S_COLOR_RED "file not found: %s\n", filename ) );
-		return;
-	}
-	if ( len >= MAX_BOTS_TEXT ) {
-		trap_Print( va( S_COLOR_RED "file too large: %s is %i, max allowed is %i", filename, len, MAX_BOTS_TEXT ) );
-		trap_FS_FCloseFile( f );
+	std::array<char, MAX_BOTS_TEXT + 1> buffer{};
+	if ( !ReadTextFile( filename, buffer ) ) {
 		return;
 	}
 
-	trap_FS_Read( buf, len, f );
-	buf[len] = 0;
-	trap_FS_FCloseFile( f );
-
-	ui_numBots += UI_ParseInfos( buf, MAX_BOTS - ui_numBots, &ui_botInfos[ui_numBots] );
+	ui_numBots += UI_ParseInfos( buffer.data(), RemainingInfoSlots( ui_botInfos, ui_numBots ) );
 	if (outOfMemory) trap_Print(S_COLOR_YELLOW"WARNING: not anough memory in pool to load all bots\n");
 }
 
@@ -341,8 +345,8 @@ UI_LoadBots
 static void UI_LoadBots( void ) {
 	vmCvar_t	botsFile;
 	int			numdirs;
-	char		filename[128];
-	char		dirlist[2048];
+	std::array<char, 128> filename{};
+	std::array<char, 2048> dirlist{};
 	char*		dirptr;
 	int			i;
 	int			dirlen;
@@ -357,13 +361,12 @@ static void UI_LoadBots( void ) {
 	}
 
 	// get all bots from .bot files
-	numdirs = trap_FS_GetFileList( "scripts", ".bot", dirlist, sizeof( dirlist ) );
-	dirptr  = dirlist;
+	numdirs = trap_FS_GetFileList( "scripts", ".bot", dirlist.data(), static_cast<int>( dirlist.size() ) );
+	dirptr  = dirlist.data();
 	for (i = 0; i < numdirs; i++, dirptr += dirlen+1) {
 		dirlen = strlen(dirptr);
-		strcpy(filename, "scripts/");
-		strcat(filename, dirptr);
-		UI_LoadBotsFromFile(filename);
+		BuildScriptPath( filename, dirptr );
+		UI_LoadBotsFromFile( filename.data() );
 	}
 	trap_Print( va( "%i bots parsed\n", ui_numBots ) );
 }
@@ -377,7 +380,7 @@ UI_GetBotInfoByNumber
 char *UI_GetBotInfoByNumber( int num ) {
 	if( num < 0 || num >= ui_numBots ) {
 		trap_Print( va( S_COLOR_RED "Invalid bot number: %i\n", num ) );
-		return NULL;
+		return nullptr;
 	}
 	return ui_botInfos[num];
 }
@@ -399,7 +402,7 @@ char *UI_GetBotInfoByName( const char *name ) {
 		}
 	}
 
-	return NULL;
+	return nullptr;
 }
 
 

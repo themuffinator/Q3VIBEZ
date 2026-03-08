@@ -2,6 +2,9 @@
 //
 #include "ui_local.h"
 
+#include <array>
+#include <cstring>
+
 /*********************************************************************************
 	SPECIFY SERVER
 *********************************************************************************/
@@ -16,16 +19,20 @@
 #define ID_SPECIFYSERVERBACK	102
 #define ID_SPECIFYSERVERGO		103
 
-static char* specifyserver_artlist[] =
-{
+namespace {
+
+constexpr std::array<const char *, 6> SpecifyServerArtList = {
 	SPECIFYSERVER_FRAMEL,
 	SPECIFYSERVER_FRAMER,
-	SPECIFYSERVER_BACK0,	
-	SPECIFYSERVER_BACK1,	
+	SPECIFYSERVER_BACK0,
+	SPECIFYSERVER_BACK1,
 	SPECIFYSERVER_FIGHT0,
-	SPECIFYSERVER_FIGHT1,
-	NULL
+	SPECIFYSERVER_FIGHT1
 };
+
+constexpr int DefaultServerPort = 27960;
+
+}
 
 typedef struct
 {
@@ -41,6 +48,22 @@ typedef struct
 
 static specifyserver_t	s_specifyserver;
 
+namespace {
+
+std::array<char, 256> BuildServerAddress() {
+	std::array<char, 256> buffer{};
+
+	Q_strncpyz( buffer.data(), s_specifyserver.domain.field.buffer, static_cast<int>( buffer.size() ) );
+	if( s_specifyserver.port.field.buffer[0] != '\0' ) {
+		const int length = static_cast<int>( std::strlen( buffer.data() ) );
+		Com_sprintf( buffer.data() + length, static_cast<int>( buffer.size() ) - length, ":%s", s_specifyserver.port.field.buffer );
+	}
+
+	return buffer;
+}
+
+}
+
 /*
 =================
 SpecifyServer_Event
@@ -48,21 +71,15 @@ SpecifyServer_Event
 */
 static void SpecifyServer_Event( void* ptr, int event )
 {
-	char	buff[256];
-
 	switch (((menucommon_s*)ptr)->id)
 	{
 		case ID_SPECIFYSERVERGO:
 			if (event != QM_ACTIVATED)
 				break;
 
-			if (s_specifyserver.domain.field.buffer[0])
-			{
-				strcpy(buff,s_specifyserver.domain.field.buffer);
-				if (s_specifyserver.port.field.buffer[0])
-					Com_sprintf( buff+strlen(buff), 128, ":%s", s_specifyserver.port.field.buffer );
-
-				trap_Cmd_ExecuteText( EXEC_APPEND, va( "connect %s\n", buff ) );
+			if( s_specifyserver.domain.field.buffer[0] ) {
+				const auto address = BuildServerAddress();
+				trap_Cmd_ExecuteText( EXEC_APPEND, va( "connect %s\n", address.data() ) );
 			}
 			break;
 
@@ -83,7 +100,7 @@ SpecifyServer_MenuInit
 void SpecifyServer_MenuInit( void )
 {
 	// zero set all our globals
-	memset( &s_specifyserver, 0 ,sizeof(specifyserver_t) );
+	s_specifyserver = {};
 
 	SpecifyServer_Cache();
 
@@ -159,7 +176,7 @@ void SpecifyServer_MenuInit( void )
 	Menu_AddItem( &s_specifyserver.menu, &s_specifyserver.go );
 	Menu_AddItem( &s_specifyserver.menu, &s_specifyserver.back );
 
-	Com_sprintf( s_specifyserver.port.field.buffer, 6, "%i", 27960 );
+	Com_sprintf( s_specifyserver.port.field.buffer, 6, "%i", DefaultServerPort );
 }
 
 /*
@@ -169,14 +186,8 @@ SpecifyServer_Cache
 */
 void SpecifyServer_Cache( void )
 {
-	int	i;
-
-	// touch all our pics
-	for (i=0; ;i++)
-	{
-		if (!specifyserver_artlist[i])
-			break;
-		trap_R_RegisterShaderNoMip(specifyserver_artlist[i]);
+	for( const char *const art : SpecifyServerArtList ) {
+		trap_R_RegisterShaderNoMip( art );
 	}
 }
 
@@ -190,4 +201,3 @@ void UI_SpecifyServerMenu( void )
 	SpecifyServer_MenuInit();
 	UI_PushMenu( &s_specifyserver.menu );
 }
-

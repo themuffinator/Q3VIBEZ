@@ -1,5 +1,8 @@
 // Copyright (C) 1999-2000 Id Software, Inc.
 //
+#include <algorithm>
+#include <array>
+
 #include "g_local.h"
 
 // g_client.c -- client functions that don't happen every frame
@@ -7,7 +10,11 @@
 const vec3_t	playerMins = {-15, -15, -24};
 const vec3_t	playerMaxs = { 15,  15,  32};
 
-static char	ban_reason[MAX_CVAR_VALUE_STRING];
+static std::array<char, MAX_CVAR_VALUE_STRING> ban_reason{};
+constexpr int MaxSpawnPoints = 64;
+
+gentity_t *SelectSpawnPoint( gentity_t *ent, vec3_t avoidPoint, vec3_t origin, vec3_t angles );
+gentity_t *SelectInitialSpawnPoint( gentity_t *ent, vec3_t origin, vec3_t angles );
 
 /*QUAKED info_player_deathmatch (1 0 1) (-16 -16 -24) (16 16 32) initial
 potential spawning position for deathmatch games.
@@ -61,17 +68,16 @@ SpotWouldTelefrag
 ================
 */
 qboolean SpotWouldTelefrag( gentity_t *spot ) {
-	int			i, num;
-	int			touch[MAX_GENTITIES];
-	gentity_t	*hit;
+	int			num;
+	std::array<int, MAX_GENTITIES> touch{};
 	vec3_t		mins, maxs;
 
 	VectorAdd( spot->s.origin, playerMins, mins );
 	VectorAdd( spot->s.origin, playerMaxs, maxs );
-	num = trap_EntitiesInBox( mins, maxs, touch, MAX_GENTITIES );
+	num = trap_EntitiesInBox( mins, maxs, touch.data(), touch.size() );
 
-	for (i=0 ; i<num ; i++) {
-		hit = &g_entities[touch[i]];
+	for ( int index = 0 ; index < num ; ++index ) {
+		gentity_t *hit = &g_entities[touch[index]];
 		//if ( hit->client && hit->client->ps.stats[STAT_HEALTH] > 0 ) {
 		if ( hit->client) {
 			return qtrue;
@@ -82,6 +88,199 @@ qboolean SpotWouldTelefrag( gentity_t *spot ) {
 	return qfalse;
 }
 
+namespace {
+auto IsBotSpawnerClient( const gentity_t *ent ) -> qboolean {
+	return Q_FromBool( ent && ( ent->r.svFlags & SVF_BOT ) == SVF_BOT );
+}
+
+auto IsEligibleFreeSpawnSpot( const gentity_t &spot, qboolean checkTelefrag, qboolean checkType, qboolean isBot ) -> qboolean {
+	if ( spot.fteam != TEAM_FREE && level.numSpawnSpotsFFA > 0 ) {
+		return qfalse;
+	}
+	if ( checkTelefrag && SpotWouldTelefrag( const_cast<gentity_t *>( &spot ) ) ) {
+		return qfalse;
+	}
+	if ( !checkType ) {
+		return qtrue;
+	}
+	if ( ( spot.flags & FL_NO_BOTS ) && isBot ) {
+		return qfalse;
+	}
+	if ( ( spot.flags & FL_NO_HUMANS ) && !isBot ) {
+		return qfalse;
+	}
+	return qtrue;
+}
+
+void InsertSpawnCandidate( std::array<float, MaxSpawnPoints> &distances, std::array<gentity_t *, MaxSpawnPoints> &spots, int &numSpots, float distance, gentity_t *spot ) {
+	int insertIndex = 0;
+	while ( insertIndex < numSpots && distance <= distances[insertIndex] ) {
+		++insertIndex;
+	}
+	if ( insertIndex >= static_cast<int>( spots.size() ) ) {
+		return;
+	}
+
+	const int lastIndex = std::min( numSpots, static_cast<int>( spots.size() ) - 1 );
+	for ( int index = lastIndex; index > insertIndex; --index ) {
+		distances[index] = distances[index - 1];
+		spots[index] = spots[index - 1];
+	}
+
+	distances[insertIndex] = distance;
+	spots[insertIndex] = spot;
+	if ( numSpots < static_cast<int>( spots.size() ) ) {
+		++numSpots;
+	}
+}
+
+auto CollectFreeSpawnCandidates( std::array<float, MaxSpawnPoints> &distances, std::array<gentity_t *, MaxSpawnPoints> &spots, const vec3_t avoidPoint, qboolean checkTelefrag, qboolean checkType, qboolean isBot ) -> int {
+	int numSpots = 0;
+	vec3_t delta;
+
+	for ( int index = 0; index < level.numSpawnSpots; ++index ) {
+		gentity_t *spot = level.spawnSpots[index];
+		if ( !IsEligibleFreeSpawnSpot( *spot, checkTelefrag, checkType, isBot ) ) {
+			continue;
+		}
+
+		VectorSubtract( spot->s.origin, avoidPoint, delta );
+		InsertSpawnCandidate( distances, spots, numSpots, VectorLength( delta ), spot );
+	}
+
+	return numSpots;
+}
+
+void ApplySpawnPoint( const gentity_t &spot, vec3_t origin, vec3_t angles ) {
+	VectorCopy( spot.s.angles, angles );
+	VectorCopy( spot.s.origin, origin );
+	origin[2] += 9.0f;
+}
+
+auto FindInitialFreeSpawnPoint() -> gentity_t * {
+	for ( int index = 0; index < level.numSpawnSpotsFFA; ++index ) {
+		gentity_t *spot = level.spawnSpots[index];
+		if ( spot->fteam == TEAM_FREE && ( spot->spawnflags & 1 ) ) {
+			return spot;
+		}
+	}
+	return nullptr;
+}
+
+using InfoStringBuffer = std::array<char, MAX_INFO_STRING>;
+
+auto GetClientUserinfoBuffer( const int client_num ) -> InfoStringBuffer {
+	InfoStringBuffer userinfo{};
+	trap_GetUserinfo( client_num, userinfo.data(), userinfo.size() );
+	return userinfo;
+}
+
+auto UserinfoValue( const InfoStringBuffer &userinfo, const char *key ) -> const char * {
+	return Info_ValueForKey( userinfo.data(), key );
+}
+
+auto UserinfoIntValue( const InfoStringBuffer &userinfo, const char *key ) -> int {
+	return atoi( UserinfoValue( userinfo, key ) );
+}
+
+auto SuggestedBalancedTeam( const int ignore_client_num ) -> team_t {
+	const std::array<int, TEAM_NUM_TEAMS> counts = {
+		0,
+		TeamCount( ignore_client_num, TEAM_RED ),
+		TeamCount( ignore_client_num, TEAM_BLUE ),
+		0
+	};
+
+	if ( counts[TEAM_BLUE] > counts[TEAM_RED] ) {
+		return TEAM_RED;
+	}
+	if ( counts[TEAM_RED] > counts[TEAM_BLUE] ) {
+		return TEAM_BLUE;
+	}
+	return level.teamScores[TEAM_BLUE] > level.teamScores[TEAM_RED] ? TEAM_RED : TEAM_BLUE;
+}
+
+auto IsLocalClientUserinfo( const InfoStringBuffer &userinfo ) -> qboolean {
+	return Q_FromBool( !strcmp( UserinfoValue( userinfo, "ip" ), "localhost" ) );
+}
+
+auto TeamOverlayEnabled( const InfoStringBuffer &userinfo ) -> qboolean {
+	const char *value = UserinfoValue( userinfo, "teamoverlay" );
+	return Q_FromBool( !*value || atoi( value ) != 0 );
+}
+
+auto ItemPredictionEnabled( const InfoStringBuffer &userinfo ) -> qboolean {
+	return Q_FromBool( UserinfoIntValue( userinfo, "cg_predictItems" ) != 0 );
+}
+
+template <std::size_t N>
+void CopyUserinfoValue( std::array<char, N> &destination, const InfoStringBuffer &userinfo, const char *key ) {
+	Q_strncpyz( destination.data(), UserinfoValue( userinfo, key ), destination.size() );
+}
+
+auto HandicapMaxHealth( const InfoStringBuffer &userinfo ) -> int {
+	const int handicap = UserinfoIntValue( userinfo, "handicap" );
+	if ( handicap < 1 || handicap > HEALTH_SOFT_LIMIT ) {
+		return HEALTH_SOFT_LIMIT;
+	}
+	return handicap;
+}
+
+#ifdef MISSIONPACK
+auto ConfiguredMaxHealth( const gclient_t &client, const InfoStringBuffer &userinfo ) -> int {
+	if ( client.ps.powerups[PW_GUARD] ) {
+		return HEALTH_SOFT_LIMIT * 2;
+	}
+	return HandicapMaxHealth( userinfo );
+}
+#else
+auto ConfiguredMaxHealth( const gclient_t &, const InfoStringBuffer &userinfo ) -> int {
+	return HandicapMaxHealth( userinfo );
+}
+#endif
+
+auto SpawnPointAllowsClient( const gentity_t &spawn_point, const gentity_t &entity ) -> bool {
+	if ( ( spawn_point.flags & FL_NO_BOTS ) && ( entity.r.svFlags & SVF_BOT ) ) {
+		return false;
+	}
+	if ( ( spawn_point.flags & FL_NO_HUMANS ) && !( entity.r.svFlags & SVF_BOT ) ) {
+		return false;
+	}
+	return true;
+}
+
+auto SelectFreeForAllSpawnPoint( gentity_t *ent, gclient_t &client, vec3_t spawn_origin, vec3_t spawn_angles ) -> gentity_t * {
+	for ( ;; ) {
+		gentity_t *spawn_point = nullptr;
+		if ( !client.pers.initialSpawn && client.pers.localClient ) {
+			client.pers.initialSpawn = qtrue;
+			spawn_point = SelectInitialSpawnPoint( ent, spawn_origin, spawn_angles );
+		} else {
+			spawn_point = SelectSpawnPoint( ent, client.ps.origin, spawn_origin, spawn_angles );
+		}
+
+		if ( SpawnPointAllowsClient( *spawn_point, *ent ) ) {
+			return spawn_point;
+		}
+	}
+}
+
+void ResetConnectingEntity( gentity_t &ent, const int client_num ) {
+	trap_UnlinkEntity( &ent );
+	ent.r.contents = 0;
+	ent.s.eType = ET_INVISIBLE;
+	ent.s.eFlags = 0;
+	ent.s.modelindex = 0;
+	ent.s.clientNum = client_num;
+	ent.s.number = client_num;
+	ent.takedamage = qfalse;
+}
+
+auto IsConnectionAdmin( const char *ip, const qboolean is_bot ) -> qboolean {
+	return Q_FromBool( !is_bot && !strcmp( ip, "localhost" ) );
+}
+}
+
 
 /*
 ===========
@@ -90,103 +289,28 @@ SelectRandomFurthestSpawnPoint
 Chooses a player start, deathmatch start, etc
 ============
 */
-#define	MAX_SPAWN_POINTS 64
 static gentity_t *SelectRandomFurthestSpawnPoint( const gentity_t *ent, vec3_t avoidPoint, vec3_t origin, vec3_t angles ) {
-	gentity_t	*spot;
-	vec3_t		delta;
-	float		dist;
-	float		list_dist[MAX_SPAWN_POINTS];
-	gentity_t	*list_spot[MAX_SPAWN_POINTS];
-	int			numSpots, i, j, n;
-	int			selection;
-	int			checkTelefrag;
-	int			checkType;
-	int			checkMask;
-	qboolean	isBot;
+	std::array<float, MaxSpawnPoints> listDist{};
+	std::array<gentity_t *, MaxSpawnPoints> listSpot{};
+	const qboolean isBot = IsBotSpawnerClient( ent );
 
-	checkType = qtrue;
-	checkTelefrag = qtrue;
+	for ( int checkMask = 3; checkMask >= 0; --checkMask ) {
+		const qboolean checkTelefrag = Q_FromBool( ( checkMask & 1 ) != 0 );
+		const qboolean checkType = Q_FromBool( ( checkMask & 2 ) != 0 );
+		const int numSpots = CollectFreeSpawnCandidates( listDist, listSpot, avoidPoint, checkTelefrag, checkType, isBot );
 
-	if ( ent )
-		isBot = ((ent->r.svFlags & SVF_BOT) == SVF_BOT); 
-	else
-		isBot = qfalse;
-
-	checkMask = 3;
-
-__search:
-
-	checkTelefrag = checkMask & 1;
-	checkType = checkMask & 2;
-
-	numSpots = 0;
-	for ( n = 0 ; n < level.numSpawnSpots ; n++ ) {
-		spot = level.spawnSpots[n];
-
-		if ( spot->fteam != TEAM_FREE && level.numSpawnSpotsFFA > 0 )
+		if ( numSpots <= 0 ) {
 			continue;
-
-		if ( checkTelefrag && SpotWouldTelefrag( spot ) )
-			continue;
-
-		if ( checkType ) 
-		{
-			if ( (spot->flags & FL_NO_BOTS) && isBot )
-				continue;
-			if ( (spot->flags & FL_NO_HUMANS) && !isBot )
-				continue;
 		}
 
-		VectorSubtract( spot->s.origin, avoidPoint, delta );
-		dist = VectorLength( delta );
-
-		for ( i = 0; i < numSpots; i++ )
-		{
-			if( dist > list_dist[i] )
-			{
-				if (numSpots >= MAX_SPAWN_POINTS)
-					numSpots = MAX_SPAWN_POINTS - 1;
-
-				for( j = numSpots; j > i; j-- )
-				{
-					list_dist[j] = list_dist[j-1];
-					list_spot[j] = list_spot[j-1];
-				}
-
-				list_dist[i] = dist;
-				list_spot[i] = spot;
-
-				numSpots++;
-				break;
-			}
-		}
-
-		if(i >= numSpots && numSpots < MAX_SPAWN_POINTS)
-		{
-			list_dist[numSpots] = dist;
-			list_spot[numSpots] = spot;
-			numSpots++;
-		}
+		// select a random spot from the spawn points furthest away
+		gentity_t *spot = listSpot[ static_cast<int>( random() * ( numSpots / 2 ) ) ];
+		ApplySpawnPoint( *spot, origin, angles );
+		return spot;
 	}
 
-	if ( !numSpots ) {
-		if ( checkMask <= 0 ) {
-			G_Error( "Couldn't find a spawn point" );
-			return NULL;
-		}
-		checkMask--;
-		goto __search; // next attempt with different flags
-	}
-
-	// select a random spot from the spawn points furthest away
-	selection = random() * (numSpots / 2);
-	spot = list_spot[ selection ];
-
-	VectorCopy( spot->s.angles, angles );
-	VectorCopy( spot->s.origin, origin );
-	origin[2] += 9.0f;
-
-	return spot;
+	G_Error( "Couldn't find a spawn point" );
+	return nullptr;
 }
 
 
@@ -211,29 +335,13 @@ use normal spawn selection.
 ============
 */
 gentity_t *SelectInitialSpawnPoint( gentity_t *ent, vec3_t origin, vec3_t angles ) {
-	gentity_t	*spot;
-	int n;
-
-	spot = NULL;
-
-	for ( n = 0; n < level.numSpawnSpotsFFA; n++ ) {
-		spot = level.spawnSpots[ n ];
-		if ( spot->fteam != TEAM_FREE )
-			continue;
-		if ( spot->spawnflags & 1 )
-			break;
-		else
-			spot = NULL;
-	}
+	gentity_t *spot = FindInitialFreeSpawnPoint();
 
 	if ( !spot || SpotWouldTelefrag( spot ) ) {
 		return SelectSpawnPoint( ent, vec3_origin, origin, angles );
 	}
 
-	VectorCopy( spot->s.angles, angles );
-	VectorCopy( spot->s.origin, origin );
-	origin[2] += 9.0f;
-
+	ApplySpawnPoint( *spot, origin, angles );
 	return spot;
 }
 
@@ -545,22 +653,7 @@ PickTeam
 ================
 */
 team_t PickTeam( int ignoreClientNum ) {
-	int		counts[TEAM_NUM_TEAMS];
-
-	counts[TEAM_BLUE] = TeamCount( ignoreClientNum, TEAM_BLUE );
-	counts[TEAM_RED] = TeamCount( ignoreClientNum, TEAM_RED );
-
-	if ( counts[TEAM_BLUE] > counts[TEAM_RED] ) {
-		return TEAM_RED;
-	}
-	if ( counts[TEAM_RED] > counts[TEAM_BLUE] ) {
-		return TEAM_BLUE;
-	}
-	// equal team count, so join the team with the lowest score
-	if ( level.teamScores[TEAM_BLUE] > level.teamScores[TEAM_RED] ) {
-		return TEAM_RED;
-	}
-	return TEAM_BLUE;
+	return SuggestedBalancedTeam( ignoreClientNum );
 }
 
 
@@ -580,25 +673,23 @@ returns qfalse in case of invalid userinfo
 qboolean ClientUserinfoChanged( int clientNum ) {
 	gentity_t *ent;
 	int		teamTask, teamLeader, health;
-	char	*s;
-	char	model[MAX_QPATH];
-	char	headModel[MAX_QPATH];
-	char	oldname[MAX_NETNAME];
+	const char	*s;
+	std::array<char, MAX_QPATH> model{};
+	std::array<char, MAX_QPATH> headModel{};
+	std::array<char, MAX_NETNAME> oldname{};
 	gclient_t	*client;
-	char	c1[8];
-	char	c2[8];
-	char	userinfo[MAX_INFO_STRING];
+	std::array<char, 8> c1{};
+	std::array<char, 8> c2{};
+	const InfoStringBuffer userinfo = GetClientUserinfoBuffer( clientNum );
 
 	ent = g_entities + clientNum;
 	client = ent->client;
 
-	trap_GetUserinfo( clientNum, userinfo, sizeof( userinfo ) );
-
 	// check for malformed or illegal info strings
-	if ( !Info_Validate( userinfo ) ) {
-		Q_strcpy( ban_reason, "bad userinfo" );
+	if ( !Info_Validate( userinfo.data() ) ) {
+		Q_strcpy( ban_reason.data(), "bad userinfo" );
 		if ( client && client->pers.connected != CON_DISCONNECTED )
-			trap_DropClient( clientNum, ban_reason );
+			trap_DropClient( clientNum, ban_reason.data() );
 		return qfalse;
 	}
 
@@ -609,24 +700,14 @@ qboolean ClientUserinfoChanged( int clientNum ) {
 	}
 
 	// check for local client
-	s = Info_ValueForKey( userinfo, "ip" );
-	if ( !strcmp( s, "localhost" ) ) {
-		client->pers.localClient = qtrue;
-	} else {
-		client->pers.localClient = qfalse;
-	}
+	client->pers.localClient = IsLocalClientUserinfo( userinfo );
 
 	// check the item prediction
-	s = Info_ValueForKey( userinfo, "cg_predictItems" );
-	if ( !atoi( s ) ) {
-		client->pers.predictItemPickup = qfalse;
-	} else {
-		client->pers.predictItemPickup = qtrue;
-	}
+	client->pers.predictItemPickup = ItemPredictionEnabled( userinfo );
 
 	// set name
-	Q_strncpyz( oldname, client->pers.netname, sizeof( oldname ) );
-	s = Info_ValueForKey( userinfo, "name" );
+	Q_strncpyz( oldname.data(), client->pers.netname, oldname.size() );
+	s = UserinfoValue( userinfo, "name" );
 	BG_CleanName( s, client->pers.netname, sizeof( client->pers.netname ), "UnnamedPlayer" );
 
 	if ( client->sess.sessionTeam == TEAM_SPECTATOR ) {
@@ -636,75 +717,50 @@ qboolean ClientUserinfoChanged( int clientNum ) {
 	}
 
 	if ( client->pers.connected == CON_CONNECTED ) {
-		if ( strcmp( oldname, client->pers.netname ) ) {
-			G_BroadcastServerCommand( -1, va("print \"%s" S_COLOR_WHITE " renamed to %s\n\"", oldname, client->pers.netname) );
+		if ( strcmp( oldname.data(), client->pers.netname ) ) {
+			G_BroadcastServerCommand( -1, va("print \"%s" S_COLOR_WHITE " renamed to %s\n\"", oldname.data(), client->pers.netname) );
 		}
 	}
 
 	// set max health
-#ifdef MISSIONPACK
-	if (client->ps.powerups[PW_GUARD]) {
-		client->pers.maxHealth = HEALTH_SOFT_LIMIT*2;
-	} else {
-		health = atoi( Info_ValueForKey( userinfo, "handicap" ) );
-		client->pers.maxHealth = health;
-		if ( client->pers.maxHealth < 1 || client->pers.maxHealth > HEALTH_SOFT_LIMIT ) {
-			client->pers.maxHealth = HEALTH_SOFT_LIMIT;
-		}
-	}
-#else
-	health = atoi( Info_ValueForKey( userinfo, "handicap" ) );
+	health = ConfiguredMaxHealth( *client, userinfo );
 	client->pers.maxHealth = health;
-	if ( client->pers.maxHealth < 1 || client->pers.maxHealth > HEALTH_SOFT_LIMIT ) {
-		client->pers.maxHealth = HEALTH_SOFT_LIMIT;
-	}
-#endif
 	client->ps.stats[STAT_MAX_HEALTH] = client->pers.maxHealth;
 
 #ifdef MISSIONPACK
 	if (g_gametype.integer >= GT_TEAM) {
 		client->pers.teamInfo = qtrue;
 	} else {
-		s = Info_ValueForKey( userinfo, "teamoverlay" );
-		if ( ! *s || atoi( s ) != 0 ) {
-			client->pers.teamInfo = qtrue;
-		} else {
-			client->pers.teamInfo = qfalse;
-		}
+		client->pers.teamInfo = TeamOverlayEnabled( userinfo );
 	}
 #else
 	// teamInfo
-	s = Info_ValueForKey( userinfo, "teamoverlay" );
-	if ( ! *s || atoi( s ) != 0 ) {
-		client->pers.teamInfo = qtrue;
-	} else {
-		client->pers.teamInfo = qfalse;
-	}
+	client->pers.teamInfo = TeamOverlayEnabled( userinfo );
 #endif
 
 	// set model
-	Q_strncpyz( model, Info_ValueForKey( userinfo, "model" ), sizeof( model ) );
-	Q_strncpyz( headModel, Info_ValueForKey( userinfo, "headmodel" ), sizeof( headModel ) );
+	CopyUserinfoValue( model, userinfo, "model" );
+	CopyUserinfoValue( headModel, userinfo, "headmodel" );
 
 	// team task (0 = none, 1 = offence, 2 = defence)
-	teamTask = atoi(Info_ValueForKey(userinfo, "teamtask"));
+	teamTask = UserinfoIntValue( userinfo, "teamtask" );
 	// team Leader (1 = leader, 0 is normal player)
 	teamLeader = client->sess.teamLeader;
 
 	// colors
-	Q_strncpyz( c1, Info_ValueForKey( userinfo, "color1" ), sizeof( c1 ) );
-	Q_strncpyz( c2, Info_ValueForKey( userinfo, "color2" ), sizeof( c2 ) );
+	CopyUserinfoValue( c1, userinfo, "color1" );
+	CopyUserinfoValue( c2, userinfo, "color2" );
 
 	// send over a subset of the userinfo keys so other clients can
 	// print scoreboards, display models, and play custom sounds
 	if ( ent->r.svFlags & SVF_BOT ) {
 		s = va("n\\%s\\t\\%i\\model\\%s\\hmodel\\%s\\c1\\%s\\c2\\%s\\hc\\%i\\w\\%i\\l\\%i\\skill\\%s\\tt\\%d\\tl\\%d",
-			client->pers.netname, client->sess.sessionTeam, model, headModel, c1, c2,
+			client->pers.netname, client->sess.sessionTeam, model.data(), headModel.data(), c1.data(), c2.data(),
 			client->pers.maxHealth, client->sess.wins, client->sess.losses,
-			Info_ValueForKey( userinfo, "skill" ), teamTask, teamLeader );
+			UserinfoValue( userinfo, "skill" ), teamTask, teamLeader );
 	} else {
 		s = va("n\\%s\\t\\%i\\model\\%s\\hmodel\\%s\\c1\\%s\\c2\\%s\\hc\\%i\\w\\%i\\l\\%i\\tt\\%d\\tl\\%d",
-			client->pers.netname, client->sess.sessionTeam, model, headModel, c1, c2, 
+			client->pers.netname, client->sess.sessionTeam, model.data(), headModel.data(), c1.data(), c2.data(), 
 			client->pers.maxHealth, client->sess.wins, client->sess.losses, teamTask, teamLeader );
 	}
 
@@ -738,10 +794,10 @@ restarts.
 ============
 */
 const char *ClientConnect( int clientNum, qboolean firstTime, qboolean isBot ) {
-	char		*value;
+	const char	*value;
 //	char		*areabits;
 	gclient_t	*client;
-	char		userinfo[MAX_INFO_STRING];
+	const InfoStringBuffer userinfo = GetClientUserinfoBuffer( clientNum );
 	gentity_t	*ent;
 	qboolean	isAdmin;
 
@@ -759,33 +815,20 @@ const char *ClientConnect( int clientNum, qboolean firstTime, qboolean isBot ) {
 			ClientDisconnect( clientNum );
 
 		// remove old entity from the world
-		trap_UnlinkEntity( ent );
-		ent->r.contents = 0;
-		ent->s.eType = ET_INVISIBLE;
-		ent->s.eFlags = 0;
-		ent->s.modelindex = 0;
-		ent->s.clientNum = clientNum;
-		ent->s.number = clientNum;
-		ent->takedamage = qfalse;
+		ResetConnectingEntity( *ent, clientNum );
 	}
 
 	ent->r.svFlags &= ~SVF_BOT;
 	ent->inuse = qfalse;
 
-	trap_GetUserinfo( clientNum, userinfo, sizeof( userinfo ) );
-
  	// IP filtering
  	// https://zerowing.idsoftware.com/bugzilla/show_bug.cgi?id=500
  	// recommanding PB based IP / GUID banning, the builtin system is pretty limited
  	// check to see if they are on the banned IP list
-	value = Info_ValueForKey( userinfo, "ip" );
+	value = UserinfoValue( userinfo, "ip" );
+	isAdmin = IsConnectionAdmin( value, isBot );
 
-	if ( !strcmp( value, "localhost" ) && !isBot )
-		isAdmin = qtrue;
-	else
-		isAdmin = qfalse;
-
-	if ( !isAdmin && G_FilterPacket( value ) ) {
+	if ( !isAdmin && G_FilterPacket( const_cast<char *>( value ) ) ) {
 		return "You are banned from this server.";
 	}
 
@@ -795,7 +838,7 @@ const char *ClientConnect( int clientNum, qboolean firstTime, qboolean isBot ) {
 	if ( !isBot && !isAdmin ) {
 		// check for a password
 		if ( g_password.string[0] && Q_stricmp( g_password.string, "none" ) ) {
-			value = Info_ValueForKey( userinfo, "password" );
+			value = UserinfoValue( userinfo, "password" );
 			if ( strcmp( g_password.string, value ) )
 				return "Invalid password";
 		}
@@ -806,17 +849,17 @@ const char *ClientConnect( int clientNum, qboolean firstTime, qboolean isBot ) {
 	client = ent->client;
 
 //	areabits = client->areabits;
-	memset( client, 0, sizeof( *client ) );
+	*client = {};
 
 	client->ps.clientNum = clientNum;
 
 	if ( !ClientUserinfoChanged( clientNum ) ) {
-		return ban_reason;
+		return ban_reason.data();
 	}
 
 	// read or initialize the session data
 	if ( firstTime || level.newSession ) {
-		value = Info_ValueForKey( userinfo, "team" );
+		value = UserinfoValue( userinfo, "team" );
 		G_InitSessionData( client, value, isBot );
 		G_WriteClientSessionData( client );
 	}
@@ -857,7 +900,7 @@ const char *ClientConnect( int clientNum, qboolean firstTime, qboolean isBot ) {
 //	if ( !client->areabits )
 //		client->areabits = G_Alloc( (trap_AAS_PointReachabilityAreaIndex( NULL ) + 7) / 8 );
 
-	return NULL;
+	return nullptr;
 }
 
 
@@ -904,7 +947,7 @@ void ClientBegin( int clientNum ) {
 	// so the viewpoint doesn't interpolate through the
 	// world to the new position
 	flags = client->ps.eFlags;
-	memset( &client->ps, 0, sizeof( client->ps ) );
+	client->ps = {};
 	client->ps.eFlags = flags;
 	client->ps.persistant[PERS_SPAWN_COUNT] = spawns;
 
@@ -961,7 +1004,7 @@ void ClientSpawn(gentity_t *ent) {
 //	char	*savedAreaBits;
 	int		accuracy_hits, accuracy_shots;
 	int		eventSequence;
-	char	userinfo[MAX_INFO_STRING];
+	InfoStringBuffer userinfo{};
 	qboolean isSpectator;
 
 	index = ent - g_entities;
@@ -979,29 +1022,7 @@ void ClientSpawn(gentity_t *ent) {
 		// all base oriented team games use the CTF spawn points
 		spawnPoint = SelectCTFSpawnPoint( ent, client->sess.sessionTeam, client->pers.teamState.state, spawn_origin, spawn_angles );
 	} else {
-		do {
-			// the first spawn should be at a good looking spot
-			if ( !client->pers.initialSpawn && client->pers.localClient ) {
-				client->pers.initialSpawn = qtrue;
-				spawnPoint = SelectInitialSpawnPoint( ent, spawn_origin, spawn_angles );
-			} else {
-				// don't spawn near existing origin if possible
-				spawnPoint = SelectSpawnPoint( ent, client->ps.origin, spawn_origin, spawn_angles );
-			}
-
-			// Tim needs to prevent bots from spawning at the initial point
-			// on q3dm0...
-			if ( ( spawnPoint->flags & FL_NO_BOTS ) && ( ent->r.svFlags & SVF_BOT ) ) {
-				continue;	// try again
-			}
-			// just to be symetric, we have a nohumans option...
-			if ( ( spawnPoint->flags & FL_NO_HUMANS ) && !( ent->r.svFlags & SVF_BOT ) ) {
-				continue;	// try again
-			}
-
-			break;
-
-		} while ( 1 );
+		spawnPoint = SelectFreeForAllSpawnPoint( ent, *client, spawn_origin, spawn_angles );
 	}
 	client->pers.teamState.state = TEAM_ACTIVE;
 
@@ -1032,7 +1053,7 @@ void ClientSpawn(gentity_t *ent) {
 	}
 	eventSequence = client->ps.eventSequence;
 
-	Com_Memset (client, 0, sizeof(*client));
+	*client = {};
 
 	client->pers = saved;
 	client->sess = savedSess;
@@ -1052,12 +1073,9 @@ void ClientSpawn(gentity_t *ent) {
 
 	client->airOutTime = level.time + 12000;
 
-	trap_GetUserinfo( index, userinfo, sizeof(userinfo) );
+	userinfo = GetClientUserinfoBuffer( index );
 	// set max health
-	client->pers.maxHealth = atoi( Info_ValueForKey( userinfo, "handicap" ) );
-	if ( client->pers.maxHealth < 1 || client->pers.maxHealth > HEALTH_SOFT_LIMIT ) {
-		client->pers.maxHealth = HEALTH_SOFT_LIMIT;
-	}
+	client->pers.maxHealth = HandicapMaxHealth( userinfo );
 	// clear entity values
 	client->ps.stats[STAT_MAX_HEALTH] = client->pers.maxHealth;
 	client->ps.eFlags = flags;

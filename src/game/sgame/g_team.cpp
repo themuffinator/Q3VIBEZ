@@ -1,6 +1,9 @@
 // Copyright (C) 1999-2000 Id Software, Inc.
 //
 
+#include <algorithm>
+#include <array>
+
 #include "g_local.h"
 
 
@@ -22,8 +25,124 @@ gentity_t	*neutralObelisk;
 
 static void Team_SetFlagStatus( team_t team, flagStatus_t status );
 
+namespace {
+constexpr std::array ctfFlagStatusRemap{ '0', '1', '*', '*', '2' };
+constexpr std::array oneFlagStatusRemap{ '0', '1', '2', '3', '4' };
+
+auto ServerCommandTarget( const gentity_t *ent ) -> int {
+	return ent == nullptr ? -1 : static_cast<int>( ent - g_entities );
+}
+
+void SanitizeServerMessage( std::array<char, 1024> &message ) {
+	std::replace( message.begin(), message.end(), '"', '\'' );
+}
+
+auto BuildFlagStatusString() -> std::array<char, 4> {
+	std::array<char, 4> status{};
+	if ( g_gametype.integer == GT_CTF ) {
+		status[0] = ctfFlagStatusRemap[teamgame.redStatus];
+		status[1] = ctfFlagStatusRemap[teamgame.blueStatus];
+	} else {
+		status[0] = oneFlagStatusRemap[teamgame.flagStatus];
+	}
+	return status;
+}
+
+auto FlagClassname( team_t team ) -> const char * {
+	switch ( team ) {
+	case TEAM_RED:
+		return "team_CTF_redflag";
+	case TEAM_BLUE:
+		return "team_CTF_blueflag";
+	case TEAM_FREE:
+		return "team_CTF_neutralflag";
+	default:
+		return nullptr;
+	}
+}
+
+auto EmitGlobalTeamSound( gentity_t *ent, int eventParm, const char *caller ) -> qboolean {
+	if ( ent == nullptr ) {
+		G_Printf( "Warning:  NULL passed to %s\n", caller );
+		return qfalse;
+	}
+
+	gentity_t *te = G_TempEntity( ent->s.pos.trBase, EV_GLOBAL_TEAM_SOUND );
+	te->s.eventParm = eventParm;
+	te->r.svFlags |= SVF_BROADCAST;
+	return qtrue;
+}
+
+auto CanPlayFlagTakenSound( team_t team ) -> qboolean {
+	switch ( team ) {
+	case TEAM_RED:
+		if ( teamgame.blueStatus != FLAG_ATBASE && teamgame.blueTakenTime > level.time - 10000 ) {
+			return qfalse;
+		}
+		teamgame.blueTakenTime = level.time;
+		return qtrue;
+
+	case TEAM_BLUE:
+		if ( teamgame.redStatus != FLAG_ATBASE && teamgame.redTakenTime > level.time - 10000 ) {
+			return qfalse;
+		}
+		teamgame.redTakenTime = level.time;
+		return qtrue;
+
+	default:
+		return qfalse;
+	}
+}
+
+constexpr float MaxLocationDistanceSquared = 3.0f * 8192.0f * 8192.0f;
+constexpr int MaxTeamSpawnPoints = 32;
+
+auto LocationDistanceSquared( const vec3_t origin, const gentity_t &location ) -> float {
+	const float deltaX = origin[0] - location.r.currentOrigin[0];
+	const float deltaY = origin[1] - location.r.currentOrigin[1];
+	const float deltaZ = origin[2] - location.r.currentOrigin[2];
+	return deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ;
+}
+
+auto ClampedLocationColorIndex( gentity_t &location ) -> int {
+	location.count = std::clamp( location.count, 0, 7 );
+	return location.count;
+}
+
+auto MatchesTeamSpawnCriteria( const gentity_t &spot, team_t team, int teamstate, qboolean checkState, qboolean checkTelefrag ) -> qboolean {
+	if ( spot.fteam != team ) {
+		return qfalse;
+	}
+	if ( checkTelefrag && SpotWouldTelefrag( const_cast<gentity_t *>( &spot ) ) ) {
+		return qfalse;
+	}
+	if ( !checkState ) {
+		return qtrue;
+	}
+	if ( teamstate == TEAM_BEGIN ) {
+		return spot.count == 0;
+	}
+	return spot.count != 0;
+}
+
+auto CollectTeamSpawnPoints( std::array<gentity_t *, MaxTeamSpawnPoints> &spots, team_t team, int teamstate, qboolean checkState, qboolean checkTelefrag ) -> int {
+	int numSpots = 0;
+	for ( int index = 0; index < level.numSpawnSpots; ++index ) {
+		gentity_t *spot = level.spawnSpots[index];
+		if ( !MatchesTeamSpawnCriteria( *spot, team, teamstate, checkState, checkTelefrag ) ) {
+			continue;
+		}
+		spots[numSpots++] = spot;
+		if ( numSpots >= static_cast<int>( spots.size() ) ) {
+			break;
+		}
+	}
+	return numSpots;
+}
+}
+
 void Team_InitGame( void ) {
-	memset(&teamgame, 0, sizeof teamgame);
+	teamgame = {};
 
 	switch( g_gametype.integer ) {
 	case GT_CTF:
@@ -88,21 +207,19 @@ const char *TeamColorString( team_t team ) {
 
 // NULL for everyone
 void QDECL PrintMsg( gentity_t *ent, const char *fmt, ... ) {
-	char		msg[1024];
+	std::array<char, 1024> msg{};
 	va_list		argptr;
-	char		*p;
 	
 	va_start (argptr,fmt);
-	if ( Q_vsprintf( msg, fmt, argptr ) >= sizeof( msg ) ) {
+	if ( Q_vsprintf( msg.data(), fmt, argptr ) >= msg.size() ) {
 		G_Error ( "PrintMsg overrun" );
 	}
 	va_end (argptr);
 
 	// double quotes are bad
-	while ((p = strchr(msg, '"')) != NULL)
-		*p = '\'';
+	SanitizeServerMessage( msg );
 
-	trap_SendServerCommand ( ( (ent == NULL) ? -1 : ent-g_entities ), va("print \"%s\"", msg ));
+	trap_SendServerCommand ( ServerCommandTarget( ent ), va("print \"%s\"", msg.data() ));
 }
 
 
@@ -171,11 +288,6 @@ qboolean OnSameTeam( gentity_t *ent1, gentity_t *ent2 ) {
 
 	return qfalse;
 }
-
-
-static char ctfFlagStatusRemap[] = { '0', '1', '*', '*', '2' };
-static char oneFlagStatusRemap[] = { '0', '1', '2', '3', '4' };
-
 static void Team_SetFlagStatus( team_t team, flagStatus_t status ) {
 	qboolean modified = qfalse;
 
@@ -206,18 +318,8 @@ static void Team_SetFlagStatus( team_t team, flagStatus_t status ) {
 	}
 
 	if ( modified ) {
-		char st[4];
-
-		if ( g_gametype.integer == GT_CTF ) {
-			st[0] = ctfFlagStatusRemap[teamgame.redStatus];
-			st[1] = ctfFlagStatusRemap[teamgame.blueStatus];
-			st[2] = '\0';
-		} else {	// GT_1FCTF
-			st[0] = oneFlagStatusRemap[teamgame.flagStatus];
-			st[1] = '\0';
-		}
-
-		trap_SetConfigstring( CS_FLAGSTATUS, st );
+		const auto statusString = BuildFlagStatusString();
+		trap_SetConfigstring( CS_FLAGSTATUS, statusString.data() );
 	}
 }
 
@@ -518,25 +620,15 @@ void Team_CheckHurtCarrier(gentity_t *targ, gentity_t *attacker)
 
 
 static gentity_t *Team_ResetFlag( team_t team ) {
-	char *c;
-	gentity_t *ent, *rent = NULL;
+	const char *classname = FlagClassname( team );
+	gentity_t *ent = nullptr;
+	gentity_t *rent = nullptr;
 
-	switch (team) {
-	case TEAM_RED:
-		c = "team_CTF_redflag";
-		break;
-	case TEAM_BLUE:
-		c = "team_CTF_blueflag";
-		break;
-	case TEAM_FREE:
-		c = "team_CTF_neutralflag";
-		break;
-	default:
-		return NULL;
+	if ( classname == nullptr ) {
+		return nullptr;
 	}
 
-	ent = NULL;
-	while ((ent = G_Find (ent, FOFS(classname), c)) != NULL) {
+	while ( ( ent = G_Find( ent, FOFS(classname), classname ) ) != nullptr ) {
 		if (ent->flags & FL_DROPPED_ITEM)
 			G_FreeEntity(ent);
 		else {
@@ -565,92 +657,33 @@ void Team_ResetFlags( void ) {
 
 
 static void Team_ReturnFlagSound( gentity_t *ent, team_t team ) {
-	gentity_t	*te;
-
-	if (ent == NULL) {
-		G_Printf ("Warning:  NULL passed to Team_ReturnFlagSound\n");
-		return;
-	}
-
-	te = G_TempEntity( ent->s.pos.trBase, EV_GLOBAL_TEAM_SOUND );
-	if( team == TEAM_BLUE ) {
-		te->s.eventParm = GTS_RED_RETURN;
-	}
-	else {
-		te->s.eventParm = GTS_BLUE_RETURN;
-	}
-	te->r.svFlags |= SVF_BROADCAST;
+	EmitGlobalTeamSound( ent, team == TEAM_BLUE ? GTS_RED_RETURN : GTS_BLUE_RETURN, "Team_ReturnFlagSound" );
 }
 
 
 static void Team_TakeFlagSound( gentity_t *ent, team_t team ) {
-	gentity_t	*te;
-
-	if ( ent == NULL ) {
-		G_Printf( "Warning:  NULL passed to Team_TakeFlagSound\n" );
+	// only play sound when the flag was at the base
+	// or not picked up the last 10 seconds
+	if ( !CanPlayFlagTakenSound( team ) ) {
 		return;
 	}
 
-	// only play sound when the flag was at the base
-	// or not picked up the last 10 seconds
-	switch ( team ) {
-		case TEAM_RED:
-			if( teamgame.blueStatus != FLAG_ATBASE ) {
-				if (teamgame.blueTakenTime > level.time - 10000)
-					return;
-			}
-			teamgame.blueTakenTime = level.time;
-			break;
-
-		case TEAM_BLUE:	// CTF
-			if( teamgame.redStatus != FLAG_ATBASE ) {
-				if (teamgame.redTakenTime > level.time - 10000)
-					return;
-			}
-			teamgame.redTakenTime = level.time;
-			break;
-
-		default:
-			return;
-	}
-
-	te = G_TempEntity( ent->s.pos.trBase, EV_GLOBAL_TEAM_SOUND );
-	if( team == TEAM_BLUE ) {
-		te->s.eventParm = GTS_RED_TAKEN;
-	}
-	else {
-		te->s.eventParm = GTS_BLUE_TAKEN;
-	}
-	te->r.svFlags |= SVF_BROADCAST;
+	EmitGlobalTeamSound( ent, team == TEAM_BLUE ? GTS_RED_TAKEN : GTS_BLUE_TAKEN, "Team_TakeFlagSound" );
 }
 
 
 static void Team_CaptureFlagSound( gentity_t *ent, team_t team ) {
-	gentity_t	*te;
-
-	if (ent == NULL) {
-		G_Printf ("Warning:  NULL passed to Team_CaptureFlagSound\n");
-		return;
-	}
-
-	te = G_TempEntity( ent->s.pos.trBase, EV_GLOBAL_TEAM_SOUND );
-	if( team == TEAM_BLUE ) {
-		te->s.eventParm = GTS_BLUE_CAPTURE;
-	}
-	else {
-		te->s.eventParm = GTS_RED_CAPTURE;
-	}
-	te->r.svFlags |= SVF_BROADCAST;
+	EmitGlobalTeamSound( ent, team == TEAM_BLUE ? GTS_BLUE_CAPTURE : GTS_RED_CAPTURE, "Team_CaptureFlagSound" );
 }
 
 
 void Team_ReturnFlag( team_t team ) {
-	Team_ReturnFlagSound(Team_ResetFlag(team), team);
+	Team_ReturnFlagSound( Team_ResetFlag( team ), team );
 	if( team == TEAM_FREE ) {
-		PrintMsg(NULL, "The flag has returned!\n" );
+		PrintMsg( nullptr, "The flag has returned!\n" );
 	}
 	else {
-		PrintMsg(NULL, "The %s flag has returned!\n", TeamName(team));
+		PrintMsg( nullptr, "The %s flag has returned!\n", TeamName(team) );
 	}
 }
 
@@ -918,30 +951,28 @@ Report a location for the player. Uses placed nearby target_location entities
 */
 gentity_t *Team_GetLocation(gentity_t *ent)
 {
-	gentity_t		*eloc, *best;
-	float			bestlen, len;
+	gentity_t		*best;
+	float			bestlen;
 	vec3_t			origin;
 
-	best = NULL;
-	bestlen = 3*8192.0*8192.0;
+	best = nullptr;
+	bestlen = MaxLocationDistanceSquared;
 
 	VectorCopy( ent->r.currentOrigin, origin );
 
-	for (eloc = level.locationHead; eloc; eloc = eloc->nextTrain) {
-		len = ( origin[0] - eloc->r.currentOrigin[0] ) * ( origin[0] - eloc->r.currentOrigin[0] )
-			+ ( origin[1] - eloc->r.currentOrigin[1] ) * ( origin[1] - eloc->r.currentOrigin[1] )
-			+ ( origin[2] - eloc->r.currentOrigin[2] ) * ( origin[2] - eloc->r.currentOrigin[2] );
+	for ( gentity_t *location = level.locationHead; location; location = location->nextTrain ) {
+		const float locationDistance = LocationDistanceSquared( origin, *location );
 
-		if ( len > bestlen ) {
+		if ( locationDistance > bestlen ) {
 			continue;
 		}
 
-		if ( !trap_InPVS( origin, eloc->r.currentOrigin ) ) {
+		if ( !trap_InPVS( origin, location->r.currentOrigin ) ) {
 			continue;
 		}
 
-		bestlen = len;
-		best = eloc;
+		bestlen = locationDistance;
+		best = location;
 	}
 
 	return best;
@@ -965,11 +996,8 @@ qboolean Team_GetLocationMsg(gentity_t *ent, char *loc, int loclen)
 		return qfalse;
 
 	if (best->count) {
-		if (best->count < 0)
-			best->count = 0;
-		if (best->count > 7)
-			best->count = 7;
-		Com_sprintf(loc, loclen, "%c%c%s" S_COLOR_WHITE, Q_COLOR_ESCAPE, best->count + '0', best->message );
+		const int locationColorIndex = ClampedLocationColorIndex( *best );
+		Com_sprintf(loc, loclen, "%c%c%s" S_COLOR_WHITE, Q_COLOR_ESCAPE, locationColorIndex + '0', best->message );
 	} else
 		Com_sprintf(loc, loclen, "%s", best->message);
 
@@ -986,58 +1014,22 @@ SelectRandomTeamSpawnPoint
 go to a random point that doesn't telefrag
 ================
 */
-#define	MAX_TEAM_SPAWN_POINTS	32
 gentity_t *SelectRandomTeamSpawnPoint( gentity_t *ent, int teamstate, team_t team ) {
-	gentity_t	*spot;
-	int			selection;
-	gentity_t	*spots[ MAX_TEAM_SPAWN_POINTS ];
-	int			numSpots;
-	int			checkMask;
-	int			n;
-	qboolean	checkState;
-	qboolean	checkTelefrag;
+	std::array<gentity_t *, MaxTeamSpawnPoints> spots{};
 
 	if ( team != TEAM_RED && team != TEAM_BLUE )
-		return NULL;
+		return nullptr;
 
-	checkMask = 3;
-
-__rescan:
-
-	checkTelefrag = checkMask & 1;
-	checkState = checkMask & 2;
-	numSpots = 0;
-
-	for ( n = 0 ; n < level.numSpawnSpots ; n++ ) {
-		spot = level.spawnSpots[ n ];
-		if ( spot->fteam != team )
-			continue;
-		if ( checkTelefrag && SpotWouldTelefrag( spot ) )
-			continue;
-		if ( checkState ) {
-			if ( teamstate == TEAM_BEGIN ) {
-				if ( spot->count != 0 )
-					continue;
-			} else {
-				if ( spot->count == 0 )
-					continue;
-			}
+	for ( int checkMask = 3; checkMask >= 0; --checkMask ) {
+		const qboolean checkTelefrag = Q_FromBool( ( checkMask & 1 ) != 0 );
+		const qboolean checkState = Q_FromBool( ( checkMask & 2 ) != 0 );
+		const int numSpots = CollectTeamSpawnPoints( spots, team, teamstate, checkState, checkTelefrag );
+		if ( numSpots > 0 ) {
+			return spots[ rand() % numSpots ];
 		}
-		spots[ numSpots++ ] = spot;
-		if ( numSpots >= MAX_TEAM_SPAWN_POINTS )
-			break;
 	}
 
-	if ( !numSpots ) {
-		if ( checkMask <= 0 ) {
-			return NULL;
-		}
-		checkMask--;
-		goto __rescan; // next attempt with different flags
-	}
-
-	selection = rand() % numSpots;
-	return spots[ selection ];
+	return nullptr;
 }
 
 
@@ -1062,13 +1054,6 @@ gentity_t *SelectCTFSpawnPoint( gentity_t *ent, team_t team, int teamstate, vec3
 	return spot;
 }
 
-/*---------------------------------------------------------------------------*/
-
-static int QDECL SortClients( const void *a, const void *b ) {
-	return *(int *)a - *(int *)b;
-}
-
-
 /*
 ==================
 TeamplayLocationsMessage
@@ -1078,98 +1063,90 @@ Format:
 
 ==================
 */
+static qboolean IsActiveTeamOverlayPlayer( const gentity_t &entity ) {
+	if ( !entity.inuse || !entity.client ) {
+		return qfalse;
+	}
+	if ( entity.client->pers.connected != CON_CONNECTED ) {
+		return qfalse;
+	}
+	return Q_FromBool( entity.client->sess.sessionTeam == TEAM_RED || entity.client->sess.sessionTeam == TEAM_BLUE );
+}
+
+static int NonNegativePlayerStat( int value ) {
+	return std::max( value, 0 );
+}
+
+static qboolean AppendTeamplayEntry( std::array<char, 128> &entry, std::array<char, MAX_STRING_CHARS - 9> &payload, int &payloadLength, int clientNum, const gentity_t &player ) {
+	const int health = NonNegativePlayerStat( player.client->ps.stats[STAT_HEALTH] );
+	const int armor = NonNegativePlayerStat( player.client->ps.stats[STAT_ARMOR] );
+	const int written = BG_sprintf( entry.data(), " %i %i %i %i %i %i",
+		clientNum,
+		player.client->pers.teamState.location,
+		health,
+		armor,
+		player.client->ps.weapon,
+		player.s.powerups );
+
+	if ( payloadLength + written >= static_cast<int>( payload.size() ) ) {
+		return qfalse;
+	}
+
+	std::copy_n( entry.data(), written + 1, payload.data() + payloadLength );
+	payloadLength += written;
+	return qtrue;
+}
+
+static void UpdateTeamOverlayLocation( gentity_t &entity ) {
+	gentity_t *location = Team_GetLocation( &entity );
+	entity.client->pers.teamState.location = location ? location->health : 0;
+}
+
 void TeamplayInfoMessage( gentity_t *ent ) {
-	char		entry[ 128 ]; // to fit 6 decimal numbers with spaces
-	char		string[ MAX_STRING_CHARS - 9 ]; // -strlen("tinfo nn ")
-	int			stringlength;
-	int			i, j;
-	gentity_t	*player;
-	int			cnt;
-	int			h, a;
-	int			clients[TEAM_MAXOVERLAY];
+	std::array<char, 128> entry{}; // to fit 6 decimal numbers with spaces
+	std::array<char, MAX_STRING_CHARS - 9> payload{}; // -strlen("tinfo nn ")
+	int			payloadLength = 0;
+	int			count = 0;
 
 	if ( !ent->client->pers.teamInfo )
 		return;
 
-	// figure out what client should be on the display
-	// we are limited to 8, but we want to use the top eight players
-	// but in client order (so they don't keep changing position on the overlay)
-	for (i = 0, cnt = 0; i < level.maxclients && cnt < TEAM_MAXOVERLAY; i++) {
-		player = g_entities + level.sortedClients[i];
-		if (player->inuse && player->client->sess.sessionTeam ==
-			ent->client->sess.sessionTeam ) {
-			clients[cnt++] = level.sortedClients[i];
+	for ( int clientNum = 0; clientNum < level.maxclients && count < TEAM_MAXOVERLAY; ++clientNum ) {
+		gentity_t &player = g_entities[clientNum];
+		if ( !player.inuse || player.client->sess.sessionTeam != ent->client->sess.sessionTeam ) {
+			continue;
 		}
+		if ( !AppendTeamplayEntry( entry, payload, payloadLength, clientNum, player ) ) {
+			break;
+		}
+		count++;
 	}
 
-	// We have the top eight players, sort them by clientNum
-	qsort( clients, cnt, sizeof( clients[0] ), SortClients );
-
-	// send the latest information on all clients
-	string[0] = '\0';
-	stringlength = 0;
-
-	for (i = 0, cnt = 0; i < level.maxclients && cnt < TEAM_MAXOVERLAY; i++) {
-		player = g_entities + i;
-		if ( player->inuse && player->client->sess.sessionTeam ==
-			ent->client->sess.sessionTeam ) {
-
-			h = player->client->ps.stats[STAT_HEALTH];
-			a = player->client->ps.stats[STAT_ARMOR];
-			if (h < 0) h = 0;
-			if (a < 0) a = 0;
-
-			j = BG_sprintf( entry, " %i %i %i %i %i %i",
-//				level.sortedClients[i], player->client->pers.teamState.location, h, a, 
-				i, player->client->pers.teamState.location, h, a, 
-				player->client->ps.weapon, player->s.powerups);
-			if ( stringlength + j >= sizeof( string ) )
-				break;
-			strcpy( string + stringlength, entry );
-			stringlength += j;
-			cnt++;
-		}
-	}
-
-	trap_SendServerCommand( ent-g_entities, va( "tinfo %i %s", cnt, string ) );
+	trap_SendServerCommand( ServerCommandTarget( ent ), va( "tinfo %i %s", count, payload.data() ) );
 }
 
 
 void CheckTeamStatus( void ) {
-	int i;
-	gentity_t *loc, *ent;
+	if ( level.time - level.lastTeamLocationTime <= TEAM_LOCATION_UPDATE_TIME ) {
+		return;
+	}
 
-	if (level.time - level.lastTeamLocationTime > TEAM_LOCATION_UPDATE_TIME) {
+	level.lastTeamLocationTime = level.time;
 
-		level.lastTeamLocationTime = level.time;
-
-		for (i = 0; i < level.maxclients; i++) {
-			ent = g_entities + i;
-
-			if ( ent->client->pers.connected != CON_CONNECTED ) {
-				continue;
-			}
-
-			if (ent->inuse && (ent->client->sess.sessionTeam == TEAM_RED ||	ent->client->sess.sessionTeam == TEAM_BLUE)) {
-				loc = Team_GetLocation( ent );
-				if (loc)
-					ent->client->pers.teamState.location = loc->health;
-				else
-					ent->client->pers.teamState.location = 0;
-			}
+	for ( int clientNum = 0; clientNum < level.maxclients; ++clientNum ) {
+		gentity_t &entity = g_entities[clientNum];
+		if ( !IsActiveTeamOverlayPlayer( entity ) ) {
+			continue;
 		}
+		UpdateTeamOverlayLocation( entity );
+	}
 
-		for (i = 0; i < level.maxclients; i++) {
-			ent = g_entities + i;
-
-			if ( ent->client->pers.connected != CON_CONNECTED ) {
-				continue;
-			}
-
-			if (ent->inuse && (ent->client->sess.sessionTeam == TEAM_RED ||	ent->client->sess.sessionTeam == TEAM_BLUE)) {
-				TeamplayInfoMessage( ent );
-			}
+	for ( int clientNum = 0; clientNum < level.maxclients; ++clientNum ) {
+		gentity_t &entity = g_entities[clientNum];
+		if ( !IsActiveTeamOverlayPlayer( entity ) ) {
+			continue;
 		}
+		TeamplayInfoMessage( &entity );
 	}
 }
 

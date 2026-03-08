@@ -4,10 +4,139 @@
 // executed by a key binding
 
 #include "cg_local.h"
+
+#include <algorithm>
+#include <array>
+#include <span>
 #ifdef MISSIONPACK
 #include "../ui/ui_shared.h"
 extern menuDef_t *menuScoreboard;
 #endif
+
+namespace {
+
+void AdjustViewSize( const int delta ) {
+	trap_Cvar_Set( "cg_viewsize", va( "%i", static_cast<int>( cg_viewsize.integer + delta ) ) );
+}
+
+void SendDirectedClientCommand( const char *commandName, const int clientNum ) {
+	std::array<char, 128> command{};
+	std::array<char, 128> message{};
+
+	trap_Args( message.data(), static_cast<int>( message.size() ) );
+	Com_sprintf( command.data(), static_cast<int>( command.size() ), "%s %i %s", commandName, clientNum, message.data() );
+	trap_SendClientCommand( command.data() );
+}
+
+void RegisterForwardedConsoleCommands() {
+	static const auto forwardedCommands = std::to_array<const char *>( {
+		"kill",
+		"say",
+		"say_team",
+		"tell",
+#ifdef MISSIONPACK
+		"vsay",
+		"vsay_team",
+		"vtell",
+		"vtaunt",
+		"vosay",
+		"vosay_team",
+		"votell",
+#endif
+		"give",
+		"god",
+		"notarget",
+		"noclip",
+		"team",
+		"follow",
+		"levelshot",
+		"addbot",
+		"setviewpos",
+		"callvote",
+		"vote",
+		"callteamvote",
+		"teamvote",
+		"stats",
+		"teamtask",
+		"loaddefered"
+	} );
+
+	for ( const char *command : forwardedCommands ) {
+		trap_AddCommand( command );
+	}
+}
+
+#ifdef MISSIONPACK
+void ScrollScoreboardFeeder( const qboolean down ) {
+	if ( menuScoreboard && cg.scoreBoardShowing ) {
+		Menu_ScrollFeeder( menuScoreboard, FEEDER_SCOREBOARD, down );
+		Menu_ScrollFeeder( menuScoreboard, FEEDER_REDTEAM_LIST, down );
+		Menu_ScrollFeeder( menuScoreboard, FEEDER_BLUETEAM_LIST, down );
+	}
+}
+
+void SendConsoleButtonPulse( const int button ) {
+	trap_SendConsoleCommand( va( "+button%d; wait; -button%d", button, button ) );
+}
+
+void SendVoiceResponse( const int leader, const char *response ) {
+	trap_SendConsoleCommand( va( "cmd vtell %d %s\n", leader, response ) );
+}
+
+void SendTeamVoiceCommand( const char *message ) {
+	trap_SendConsoleCommand( va( "cmd vsay_team %s\n", message ) );
+}
+
+void SendTeamTaskCommand( const int teamTask ) {
+	trap_SendClientCommand( va( "teamtask %d\n", teamTask ) );
+}
+
+void SendLiteralConsoleCommand( const char *command ) {
+	trap_SendConsoleCommand( command );
+}
+
+void SendDirectedLiteralClientCommand( const char *commandName, const int clientNum, const char *message ) {
+	std::array<char, 128> command{};
+	Com_sprintf( command.data(), static_cast<int>( command.size() ), "%s %i %s", commandName, clientNum, message );
+	trap_SendClientCommand( command.data() );
+}
+
+void ConfigureSinglePlayerVictoryCamera() {
+	trap_Cvar_Set( "cg_cameraOrbit", "2" );
+	trap_Cvar_Set( "cg_cameraOrbitDelay", "35" );
+	trap_Cvar_Set( "cg_thirdPerson", "1" );
+	trap_Cvar_Set( "cg_thirdPersonAngle", "0" );
+	trap_Cvar_Set( "cg_thirdPersonRange", "100" );
+}
+
+void ShowSinglePlayerResult( sfxHandle_t sound, const char *message ) {
+	ConfigureSinglePlayerVictoryCamera();
+	CG_AddBufferedSound( sound );
+	CG_CenterPrint( message, SCREEN_HEIGHT * .30f, 0 );
+}
+
+[[nodiscard]] bool CanSelectNextOrder() {
+	const clientInfo_t *clientInfo = cgs.clientinfo + cg.snap->ps.clientNum;
+	return clientInfo == nullptr || clientInfo->teamLeader || sortedTeamPlayers[cg_currentSelectedPlayer.integer] == cg.snap->ps.clientNum;
+}
+
+[[nodiscard]] int NextMissionpackOrder( const int currentOrder ) {
+	int nextOrder = currentOrder < TEAMTASK_CAMP ? currentOrder + 1 : TEAMTASK_OFFENSE;
+
+	if ( nextOrder == TEAMTASK_RETRIEVE && !CG_OtherTeamHasFlag() ) {
+		++nextOrder;
+	}
+	if ( nextOrder == TEAMTASK_ESCORT && !CG_YourTeamHasFlag() ) {
+		++nextOrder;
+	}
+	if ( nextOrder > TEAMTASK_CAMP ) {
+		nextOrder = TEAMTASK_OFFENSE;
+	}
+	return nextOrder;
+}
+#endif
+
+} // namespace
 
 
 /*
@@ -17,15 +146,15 @@ CG_TargetCommand_f
 */
 static void CG_TargetCommand_f( void ) {
 	int		targetNum;
-	char	cmd[4];
+	std::array<char, 4> command{};
 
 	targetNum = CG_CrosshairPlayer();
 	if ( targetNum == -1 ) {
 		return;
 	}
 
-	trap_Argv( 1, cmd, sizeof( cmd ) );
-	trap_SendConsoleCommand( va( "gc %i %i", targetNum, atoi( cmd ) ) );
+	trap_Argv( 1, command.data(), command.size() );
+	trap_SendConsoleCommand( va( "gc %i %i", targetNum, atoi( command.data() ) ) );
 }
 
 
@@ -38,7 +167,7 @@ Keybinding command
 =================
 */
 static void CG_SizeUp_f (void) {
-	trap_Cvar_Set("cg_viewsize", va("%i",(int)(cg_viewsize.integer+10)));
+	AdjustViewSize( 10 );
 }
 
 
@@ -50,7 +179,7 @@ Keybinding command
 =================
 */
 static void CG_SizeDown_f (void) {
-	trap_Cvar_Set("cg_viewsize", va("%i",(int)(cg_viewsize.integer-10)));
+	AdjustViewSize( -10 );
 }
 
 
@@ -115,62 +244,39 @@ static void CG_ScoresUp_f( void ) {
 extern menuDef_t *menuScoreboard;
 
 static void CG_LoadHud_f( void) {
-  char buff[1024];
+	std::array<char, 1024> hudFileBuffer{};
 	const char *hudSet;
-  memset(buff, 0, sizeof(buff));
 
 	String_Init();
 	Menu_Reset();
 	
-	trap_Cvar_VariableStringBuffer("cg_hudFiles", buff, sizeof(buff));
-	hudSet = buff;
+	trap_Cvar_VariableStringBuffer( "cg_hudFiles", hudFileBuffer.data(), hudFileBuffer.size() );
+	hudSet = hudFileBuffer.data();
 	if (hudSet[0] == '\0') {
 		hudSet = "ui/hud.txt";
 	}
 
 	CG_LoadMenus(hudSet);
-  menuScoreboard = NULL;
+	menuScoreboard = nullptr;
 }
 
 
 static void CG_scrollScoresDown_f( void) {
-	if (menuScoreboard && cg.scoreBoardShowing) {
-		Menu_ScrollFeeder(menuScoreboard, FEEDER_SCOREBOARD, qtrue);
-		Menu_ScrollFeeder(menuScoreboard, FEEDER_REDTEAM_LIST, qtrue);
-		Menu_ScrollFeeder(menuScoreboard, FEEDER_BLUETEAM_LIST, qtrue);
-	}
+	ScrollScoreboardFeeder( qtrue );
 }
 
 
 static void CG_scrollScoresUp_f( void) {
-	if (menuScoreboard && cg.scoreBoardShowing) {
-		Menu_ScrollFeeder(menuScoreboard, FEEDER_SCOREBOARD, qfalse);
-		Menu_ScrollFeeder(menuScoreboard, FEEDER_REDTEAM_LIST, qfalse);
-		Menu_ScrollFeeder(menuScoreboard, FEEDER_BLUETEAM_LIST, qfalse);
-	}
+	ScrollScoreboardFeeder( qfalse );
 }
 
 
 static void CG_spWin_f( void) {
-	trap_Cvar_Set("cg_cameraOrbit", "2");
-	trap_Cvar_Set("cg_cameraOrbitDelay", "35");
-	trap_Cvar_Set("cg_thirdPerson", "1");
-	trap_Cvar_Set("cg_thirdPersonAngle", "0");
-	trap_Cvar_Set("cg_thirdPersonRange", "100");
-	CG_AddBufferedSound(cgs.media.winnerSound);
-	//trap_S_StartLocalSound(cgs.media.winnerSound, CHAN_ANNOUNCER);
-	CG_CenterPrint("YOU WIN!", SCREEN_HEIGHT * .30, 0);
+	ShowSinglePlayerResult( cgs.media.winnerSound, "YOU WIN!" );
 }
 
 static void CG_spLose_f( void) {
-	trap_Cvar_Set("cg_cameraOrbit", "2");
-	trap_Cvar_Set("cg_cameraOrbitDelay", "35");
-	trap_Cvar_Set("cg_thirdPerson", "1");
-	trap_Cvar_Set("cg_thirdPersonAngle", "0");
-	trap_Cvar_Set("cg_thirdPersonRange", "100");
-	CG_AddBufferedSound(cgs.media.loserSound);
-	//trap_S_StartLocalSound(cgs.media.loserSound, CHAN_ANNOUNCER);
-	CG_CenterPrint("YOU LOSE...", SCREEN_HEIGHT * .30, 0);
+	ShowSinglePlayerResult( cgs.media.loserSound, "YOU LOSE..." );
 }
 
 #endif
@@ -181,18 +287,12 @@ CG_TellTarget_f
 ==================
 */
 static void CG_TellTarget_f( void ) {
-	int		clientNum;
-	char	command[128];
-	char	message[128];
-
-	clientNum = CG_CrosshairPlayer();
+	const int clientNum = CG_CrosshairPlayer();
 	if ( clientNum == -1 ) {
 		return;
 	}
 
-	trap_Args( message, sizeof( message ) );
-	Com_sprintf( command, sizeof( command ), "tell %i %s", clientNum, message );
-	trap_SendClientCommand( command );
+	SendDirectedClientCommand( "tell", clientNum );
 }
 
 
@@ -202,18 +302,12 @@ CG_TellAttacker_f
 ==================
 */
 static void CG_TellAttacker_f( void ) {
-	int		clientNum;
-	char	command[128];
-	char	message[128];
-
-	clientNum = CG_LastAttacker();
+	const int clientNum = CG_LastAttacker();
 	if ( clientNum == -1 ) {
 		return;
 	}
 
-	trap_Args( message, sizeof( message ) );
-	Com_sprintf( command, sizeof( command ), "tell %i %s", clientNum, message );
-	trap_SendClientCommand( command );
+	SendDirectedClientCommand( "tell", clientNum );
 }
 
 
@@ -224,18 +318,12 @@ CG_VoiceTellTarget_f
 ==================
 */
 static void CG_VoiceTellTarget_f( void ) {
-	int		clientNum;
-	char	command[128];
-	char	message[128];
-
-	clientNum = CG_CrosshairPlayer();
+	const int clientNum = CG_CrosshairPlayer();
 	if ( clientNum == -1 ) {
 		return;
 	}
 
-	trap_Args( message, sizeof( message ) );
-	Com_sprintf( command, sizeof( command ), "vtell %i %s", clientNum, message );
-	trap_SendClientCommand( command );
+	SendDirectedClientCommand( "vtell", clientNum );
 }
 
 
@@ -245,18 +333,12 @@ CG_VoiceTellAttacker_f
 ==================
 */
 static void CG_VoiceTellAttacker_f( void ) {
-	int		clientNum;
-	char	command[128];
-	char	message[128];
-
-	clientNum = CG_LastAttacker();
+	const int clientNum = CG_LastAttacker();
 	if ( clientNum == -1 ) {
 		return;
 	}
 
-	trap_Args( message, sizeof( message ) );
-	Com_sprintf( command, sizeof( command ), "vtell %i %s", clientNum, message );
-	trap_SendClientCommand( command );
+	SendDirectedClientCommand( "vtell", clientNum );
 }
 
 static void CG_NextTeamMember_f( void ) {
@@ -270,47 +352,27 @@ static void CG_PrevTeamMember_f( void ) {
 // ASS U ME's enumeration order as far as task specific orders, OFFENSE is zero, CAMP is last
 //
 static void CG_NextOrder_f( void ) {
-	clientInfo_t *ci = cgs.clientinfo + cg.snap->ps.clientNum;
-	if (ci) {
-		if (!ci->teamLeader && sortedTeamPlayers[cg_currentSelectedPlayer.integer] != cg.snap->ps.clientNum) {
-			return;
-		}
+	if ( !CanSelectNextOrder() ) {
+		return;
 	}
-	if (cgs.currentOrder < TEAMTASK_CAMP) {
-		cgs.currentOrder++;
-
-		if (cgs.currentOrder == TEAMTASK_RETRIEVE) {
-			if (!CG_OtherTeamHasFlag()) {
-				cgs.currentOrder++;
-			}
-		}
-
-		if (cgs.currentOrder == TEAMTASK_ESCORT) {
-			if (!CG_YourTeamHasFlag()) {
-				cgs.currentOrder++;
-			}
-		}
-
-	} else {
-		cgs.currentOrder = TEAMTASK_OFFENSE;
-	}
+	cgs.currentOrder = NextMissionpackOrder( cgs.currentOrder );
 	cgs.orderPending = qtrue;
 	cgs.orderTime = cg.time + 3000;
 }
 
 
 static void CG_ConfirmOrder_f (void ) {
-	trap_SendConsoleCommand(va("cmd vtell %d %s\n", cgs.acceptLeader, VOICECHAT_YES));
-	trap_SendConsoleCommand("+button5; wait; -button5");
+	SendVoiceResponse( cgs.acceptLeader, VOICECHAT_YES );
+	SendConsoleButtonPulse( 5 );
 	if (cg.time < cgs.acceptOrderTime) {
-		trap_SendClientCommand(va("teamtask %d\n", cgs.acceptTask));
+		SendTeamTaskCommand( cgs.acceptTask );
 		cgs.acceptOrderTime = 0;
 	}
 }
 
 static void CG_DenyOrder_f (void ) {
-	trap_SendConsoleCommand(va("cmd vtell %d %s\n", cgs.acceptLeader, VOICECHAT_NO));
-	trap_SendConsoleCommand("+button6; wait; -button6");
+	SendVoiceResponse( cgs.acceptLeader, VOICECHAT_NO );
+	SendConsoleButtonPulse( 6 );
 	if (cg.time < cgs.acceptOrderTime) {
 		cgs.acceptOrderTime = 0;
 	}
@@ -318,78 +380,74 @@ static void CG_DenyOrder_f (void ) {
 
 static void CG_TaskOffense_f (void ) {
 	if (cgs.gametype == GT_CTF || cgs.gametype == GT_1FCTF) {
-		trap_SendConsoleCommand(va("cmd vsay_team %s\n", VOICECHAT_ONGETFLAG));
+		SendTeamVoiceCommand( VOICECHAT_ONGETFLAG );
 	} else {
-		trap_SendConsoleCommand(va("cmd vsay_team %s\n", VOICECHAT_ONOFFENSE));
+		SendTeamVoiceCommand( VOICECHAT_ONOFFENSE );
 	}
-	trap_SendClientCommand(va("teamtask %d\n", TEAMTASK_OFFENSE));
+	SendTeamTaskCommand( TEAMTASK_OFFENSE );
 }
 
 static void CG_TaskDefense_f (void ) {
-	trap_SendConsoleCommand(va("cmd vsay_team %s\n", VOICECHAT_ONDEFENSE));
-	trap_SendClientCommand(va("teamtask %d\n", TEAMTASK_DEFENSE));
+	SendTeamVoiceCommand( VOICECHAT_ONDEFENSE );
+	SendTeamTaskCommand( TEAMTASK_DEFENSE );
 }
 
 static void CG_TaskPatrol_f (void ) {
-	trap_SendConsoleCommand(va("cmd vsay_team %s\n", VOICECHAT_ONPATROL));
-	trap_SendClientCommand(va("teamtask %d\n", TEAMTASK_PATROL));
+	SendTeamVoiceCommand( VOICECHAT_ONPATROL );
+	SendTeamTaskCommand( TEAMTASK_PATROL );
 }
 
 static void CG_TaskCamp_f (void ) {
-	trap_SendConsoleCommand(va("cmd vsay_team %s\n", VOICECHAT_ONCAMPING));
-	trap_SendClientCommand(va("teamtask %d\n", TEAMTASK_CAMP));
+	SendTeamVoiceCommand( VOICECHAT_ONCAMPING );
+	SendTeamTaskCommand( TEAMTASK_CAMP );
 }
 
 static void CG_TaskFollow_f (void ) {
-	trap_SendConsoleCommand(va("cmd vsay_team %s\n", VOICECHAT_ONFOLLOW));
-	trap_SendClientCommand(va("teamtask %d\n", TEAMTASK_FOLLOW));
+	SendTeamVoiceCommand( VOICECHAT_ONFOLLOW );
+	SendTeamTaskCommand( TEAMTASK_FOLLOW );
 }
 
 static void CG_TaskRetrieve_f (void ) {
-	trap_SendConsoleCommand(va("cmd vsay_team %s\n", VOICECHAT_ONRETURNFLAG));
-	trap_SendClientCommand(va("teamtask %d\n", TEAMTASK_RETRIEVE));
+	SendTeamVoiceCommand( VOICECHAT_ONRETURNFLAG );
+	SendTeamTaskCommand( TEAMTASK_RETRIEVE );
 }
 
 static void CG_TaskEscort_f (void ) {
-	trap_SendConsoleCommand(va("cmd vsay_team %s\n", VOICECHAT_ONFOLLOWCARRIER));
-	trap_SendClientCommand(va("teamtask %d\n", TEAMTASK_ESCORT));
+	SendTeamVoiceCommand( VOICECHAT_ONFOLLOWCARRIER );
+	SendTeamTaskCommand( TEAMTASK_ESCORT );
 }
 
 static void CG_TaskOwnFlag_f (void ) {
-	trap_SendConsoleCommand(va("cmd vsay_team %s\n", VOICECHAT_IHAVEFLAG));
+	SendTeamVoiceCommand( VOICECHAT_IHAVEFLAG );
 }
 
 static void CG_TauntKillInsult_f (void ) {
-	trap_SendConsoleCommand("cmd vsay kill_insult\n");
+	SendLiteralConsoleCommand( "cmd vsay kill_insult\n" );
 }
 
 static void CG_TauntPraise_f (void ) {
-	trap_SendConsoleCommand("cmd vsay praise\n");
+	SendLiteralConsoleCommand( "cmd vsay praise\n" );
 }
 
 static void CG_TauntTaunt_f (void ) {
-	trap_SendConsoleCommand("cmd vtaunt\n");
+	SendLiteralConsoleCommand( "cmd vtaunt\n" );
 }
 
 static void CG_TauntDeathInsult_f (void ) {
-	trap_SendConsoleCommand("cmd vsay death_insult\n");
+	SendLiteralConsoleCommand( "cmd vsay death_insult\n" );
 }
 
 static void CG_TauntGauntlet_f (void ) {
-	trap_SendConsoleCommand("cmd vsay kill_gauntlet\n");
+	SendLiteralConsoleCommand( "cmd vsay kill_gauntlet\n" );
 }
 
 static void CG_TaskSuicide_f (void ) {
-	int		clientNum;
-	char	command[128];
-
-	clientNum = CG_CrosshairPlayer();
+	const int clientNum = CG_CrosshairPlayer();
 	if ( clientNum == -1 ) {
 		return;
 	}
 
-	Com_sprintf( command, 128, "tell %i suicide", clientNum );
-	trap_SendClientCommand( command );
+	SendDirectedLiteralClientCommand( "tell", clientNum, "suicide" );
 }
 
 
@@ -432,10 +490,10 @@ CG_StartOrbit_f
 */
 
 static void CG_StartOrbit_f( void ) {
-	char var[MAX_TOKEN_CHARS];
+	std::array<char, MAX_TOKEN_CHARS> developerValue{};
 
-	trap_Cvar_VariableStringBuffer( "developer", var, sizeof( var ) );
-	if ( !atoi(var) ) {
+	trap_Cvar_VariableStringBuffer( "developer", developerValue.data(), developerValue.size() );
+	if ( !atoi( developerValue.data() ) ) {
 		return;
 	}
 	if (cg_cameraOrbit.value != 0) {
@@ -468,7 +526,7 @@ typedef struct {
 	void	(*function)(void);
 } consoleCommand_t;
 
-static consoleCommand_t	commands[] = {
+static const auto commands = std::to_array<consoleCommand_t>( {
 	{ "testgun", CG_TestGun_f },
 	{ "testmodel", CG_TestModel_f },
 	{ "nextframe", CG_TestModelNextFrame_f },
@@ -519,7 +577,23 @@ static consoleCommand_t	commands[] = {
 	{ "startOrbit", CG_StartOrbit_f },
 	//{ "camera", CG_Camera_f },
 	{ "loaddeferred", CG_LoadDeferredPlayers }	
-};
+} );
+
+namespace {
+
+[[nodiscard]] auto CommandEntries() noexcept -> std::span<const consoleCommand_t> {
+	return commands;
+}
+
+[[nodiscard]] const consoleCommand_t *FindConsoleCommand( const char *cmd ) {
+	const auto commandIt = std::find_if( commands.begin(), commands.end(), [cmd]( const consoleCommand_t &command ) {
+		return !Q_stricmp( cmd, command.cmd );
+	} );
+
+	return commandIt != commands.end() ? &*commandIt : nullptr;
+}
+
+} // namespace
 
 
 /*
@@ -531,16 +605,9 @@ Cmd_Argc() / Cmd_Argv()
 =================
 */
 qboolean CG_ConsoleCommand( void ) {
-	const char	*cmd;
-	int		i;
-
-	cmd = CG_Argv(0);
-
-	for ( i = 0 ; i < ARRAY_LEN( commands ) ; i++ ) {
-		if ( !Q_stricmp( cmd, commands[i].cmd ) ) {
-			commands[i].function();
-			return qtrue;
-		}
+	if ( const auto *command = FindConsoleCommand( CG_Argv( 0 ) ); command != nullptr ) {
+		command->function();
+		return qtrue;
 	}
 
 	return qfalse;
@@ -556,43 +623,13 @@ so it can perform tab completion
 =================
 */
 void CG_InitConsoleCommands( void ) {
-	int		i;
-
-	for ( i = 0 ; i < ARRAY_LEN( commands ) ; i++ ) {
-		trap_AddCommand( commands[i].cmd );
+	for ( const consoleCommand_t &command : CommandEntries() ) {
+		trap_AddCommand( command.cmd );
 	}
 
 	//
 	// the game server will interpret these commands, which will be automatically
 	// forwarded to the server after they are not recognized locally
 	//
-	trap_AddCommand ("kill");
-	trap_AddCommand ("say");
-	trap_AddCommand ("say_team");
-	trap_AddCommand ("tell");
-#ifdef MISSIONPACK
-	trap_AddCommand ("vsay");
-	trap_AddCommand ("vsay_team");
-	trap_AddCommand ("vtell");
-	trap_AddCommand ("vtaunt");
-	trap_AddCommand ("vosay");
-	trap_AddCommand ("vosay_team");
-	trap_AddCommand ("votell");
-#endif
-	trap_AddCommand ("give");
-	trap_AddCommand ("god");
-	trap_AddCommand ("notarget");
-	trap_AddCommand ("noclip");
-	trap_AddCommand ("team");
-	trap_AddCommand ("follow");
-	trap_AddCommand ("levelshot");
-	trap_AddCommand ("addbot");
-	trap_AddCommand ("setviewpos");
-	trap_AddCommand ("callvote");
-	trap_AddCommand ("vote");
-	trap_AddCommand ("callteamvote");
-	trap_AddCommand ("teamvote");
-	trap_AddCommand ("stats");
-	trap_AddCommand ("teamtask");
-	trap_AddCommand ("loaddefered");	// spelled wrong, but not changing for demo
+	RegisterForwardedConsoleCommands();
 }

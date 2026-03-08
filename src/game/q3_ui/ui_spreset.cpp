@@ -30,6 +30,11 @@ static resetMenu_t	s_reset;
 Reset_MenuEvent
 =================
 */
+static qboolean ResetMenuFullscreen( const uiClientState_t &clientState ) {
+	return clientState.connState < CA_CONNECTED;
+}
+
+
 void Reset_MenuEvent(void* ptr, int event) {
 	if( event != QM_ACTIVATED ) {
 		return;
@@ -117,7 +122,7 @@ void UI_ResetMenu(void) {
 	int	l1, l2, l3;
 
 	// zero set all our globals
-	memset( &s_reset, 0, sizeof(s_reset) );
+	s_reset = {};
 
 	Reset_Cache();
 
@@ -135,14 +140,7 @@ void UI_ResetMenu(void) {
 
 	trap_GetClientState( &cstate );
 
-	if ( cstate.connState >= CA_CONNECTED ) {
-		// float on top of running game
-		s_reset.menu.fullscreen = qfalse;
-	}
-	else {
-		// game not running
-		s_reset.menu.fullscreen = qtrue;
-	}
+	s_reset.menu.fullscreen = ResetMenuFullscreen( cstate );
 
 	s_reset.yes.generic.type		= MTYPE_PTEXT;      
 	s_reset.yes.generic.flags		= QMF_LEFT_JUSTIFY|QMF_PULSEIFFOCUS; 

@@ -2,6 +2,9 @@
 //
 #include "ui_local.h"
 
+#include <array>
+#include <algorithm>
+
 /*
 ===============================================================================
 
@@ -16,7 +19,30 @@ CONNECTION SCREEN
 static connstate_t	lastConnState;
 static char			lastLoadingText[MAX_INFO_VALUE];
 
-static void UI_ReadableSize ( char *buf, int bufsize, int value )
+namespace {
+
+using DownloadInfoBuffer = std::array<char, 64>;
+
+[[nodiscard]] int GetDownloadCvarValue( const char *name ) {
+	std::array<char, 64> buffer{};
+	trap_Cvar_VariableStringBuffer( name, buffer.data(), static_cast<int>( buffer.size() ) );
+	return atoi( buffer.data() );
+}
+
+[[nodiscard]] int MaxConnectionLabelWidth( const int style ) {
+	const auto labels = std::to_array<const char *>( { "Downloading:", "Estimated time left:", "Transfer rate:" } );
+	int maxWidth = 0;
+	for ( const char *label : labels ) {
+		maxWidth = std::max( maxWidth, static_cast<int>( UI_ProportionalStringWidth( label ) * UI_ProportionalSizeScale( style ) ) );
+	}
+	return maxWidth + 16;
+}
+
+void DrawCopiedAmount( const int leftWidth, const int y, const DownloadInfoBuffer &downloaded, const DownloadInfoBuffer &total, const int style ) {
+	UI_DrawProportionalString( leftWidth, y, va( "(%s of %s copied)", downloaded.data(), total.data() ), style, color_white );
+}
+
+void UI_ReadableSize ( char *buf, int bufsize, int value )
 {
 	if (value > 1024*1024*1024 ) { // gigs
 		Com_sprintf( buf, bufsize, "%d", value / (1024*1024*1024) );
@@ -34,7 +60,7 @@ static void UI_ReadableSize ( char *buf, int bufsize, int value )
 }
 
 // Assumes time is in msec
-static void UI_PrintTime ( char *buf, int bufsize, int time ) {
+void UI_PrintTime ( char *buf, int bufsize, int time ) {
 	time /= 1000;  // change to seconds
 
 	if (time > 3600) { // in the hours range
@@ -46,24 +72,26 @@ static void UI_PrintTime ( char *buf, int bufsize, int time ) {
 	}
 }
 
+} // namespace
+
 static void UI_DisplayDownloadInfo( const char *downloadName ) {
-	static char dlText[]	= "Downloading:";
-	static char etaText[]	= "Estimated time left:";
-	static char xferText[]	= "Transfer rate:";
+	static constexpr char dlText[]	= "Downloading:";
+	static constexpr char etaText[]	= "Estimated time left:";
+	static constexpr char xferText[]	= "Transfer rate:";
 
 	int downloadSize, downloadCount, downloadTime, percentage;
-	char dlSizeBuf[64], totalSizeBuf[64], xferRateBuf[64], dlTimeBuf[64], buf[64];
+	DownloadInfoBuffer dlSizeBuf{};
+	DownloadInfoBuffer totalSizeBuf{};
+	DownloadInfoBuffer xferRateBuf{};
+	DownloadInfoBuffer dlTimeBuf{};
 	int xferRate;
-	int width, leftWidth, div;
+	int leftWidth, div;
 	int style = UI_LEFT|UI_SMALLFONT|UI_DROPSHADOW;
 	const char *s;
 
-	trap_Cvar_VariableStringBuffer( "cl_downloadSize", buf, sizeof( buf ) );
-	downloadSize = atoi( buf );
-	trap_Cvar_VariableStringBuffer( "cl_downloadCount", buf, sizeof( buf ) );
-	downloadCount = atoi( buf ); 
-	trap_Cvar_VariableStringBuffer( "cl_downloadTime", buf, sizeof( buf ) );
-	downloadTime = atoi( buf );
+	downloadSize = GetDownloadCvarValue( "cl_downloadSize" );
+	downloadCount = GetDownloadCvarValue( "cl_downloadCount" );
+	downloadTime = GetDownloadCvarValue( "cl_downloadTime" );
 
 #if 0 // bk010104
 	fprintf( stderr, "\n\n-----------------------------------------------\n");
@@ -74,12 +102,7 @@ static void UI_DisplayDownloadInfo( const char *downloadName ) {
 	fprintf( stderr, "DB: UI frametime:  %16d\n", uis.frametime );	// bk
 #endif
 
-	leftWidth = width = UI_ProportionalStringWidth( dlText ) * UI_ProportionalSizeScale( style );
-	width = UI_ProportionalStringWidth( etaText ) * UI_ProportionalSizeScale( style );
-	if (width > leftWidth) leftWidth = width;
-	width = UI_ProportionalStringWidth( xferText ) * UI_ProportionalSizeScale( style );
-	if (width > leftWidth) leftWidth = width;
-	leftWidth += 16;
+	leftWidth = MaxConnectionLabelWidth( style );
 
 	UI_DrawProportionalString( 8, 128, dlText, style, color_white );
 	UI_DrawProportionalString( 8, 160, etaText, style, color_white );
@@ -103,13 +126,12 @@ static void UI_DisplayDownloadInfo( const char *downloadName ) {
 
 	UI_DrawProportionalString( leftWidth, 128, s, style, color_white );
 
-	UI_ReadableSize( dlSizeBuf,		sizeof dlSizeBuf,		downloadCount );
-	UI_ReadableSize( totalSizeBuf,	sizeof totalSizeBuf,	downloadSize );
+	UI_ReadableSize( dlSizeBuf.data(), static_cast<int>( dlSizeBuf.size() ), downloadCount );
+	UI_ReadableSize( totalSizeBuf.data(), static_cast<int>( totalSizeBuf.size() ), downloadSize );
 
 	if (downloadCount < 4096 || !downloadTime) {
 		UI_DrawProportionalString( leftWidth, 160, "estimating", style, color_white );
-		UI_DrawProportionalString( leftWidth, 192, 
-			va("(%s of %s copied)", dlSizeBuf, totalSizeBuf), style, color_white );
+		DrawCopiedAmount( leftWidth, 192, dlSizeBuf, totalSizeBuf, style );
 	} else {
 	  // bk010108
 	  //float elapsedTime = (float)(uis.realtime - downloadTime); // current - start (msecs)
@@ -125,7 +147,7 @@ static void UI_DisplayDownloadInfo( const char *downloadName ) {
 	  //fprintf( stderr, "DB: elapsedTime:  %16.8f\n", elapsedTime );	// bk
 	  //fprintf( stderr, "DB: xferRate:   %16d\n", xferRate );	// bk
 
-		UI_ReadableSize( xferRateBuf, sizeof xferRateBuf, xferRate );
+		UI_ReadableSize( xferRateBuf.data(), static_cast<int>( xferRateBuf.size() ), xferRate );
 
 		// Extrapolate estimated completion time
 		if (downloadSize && xferRate) {
@@ -134,28 +156,26 @@ static void UI_DisplayDownloadInfo( const char *downloadName ) {
 			// We do it in K (/1024) because we'd overflow around 4MB
 			n = (n - (((downloadCount/1024) * n) / (downloadSize/1024))) * 1000;
 			
-			UI_PrintTime ( dlTimeBuf, sizeof dlTimeBuf, n ); // bk010104
+			UI_PrintTime ( dlTimeBuf.data(), static_cast<int>( dlTimeBuf.size() ), n ); // bk010104
 				//(n - (((downloadCount/1024) * n) / (downloadSize/1024))) * 1000);
 
 			UI_DrawProportionalString( leftWidth, 160, 
-				dlTimeBuf, style, color_white );
-			UI_DrawProportionalString( leftWidth, 192, 
-				va("(%s of %s copied)", dlSizeBuf, totalSizeBuf), style, color_white );
+				dlTimeBuf.data(), style, color_white );
+			DrawCopiedAmount( leftWidth, 192, dlSizeBuf, totalSizeBuf, style );
 		} else {
 			UI_DrawProportionalString( leftWidth, 160, 
 				"estimating", style, color_white );
 			if (downloadSize) {
-				UI_DrawProportionalString( leftWidth, 192, 
-					va("(%s of %s copied)", dlSizeBuf, totalSizeBuf), style, color_white );
+				DrawCopiedAmount( leftWidth, 192, dlSizeBuf, totalSizeBuf, style );
 			} else {
 				UI_DrawProportionalString( leftWidth, 192, 
-					va("(%s copied)", dlSizeBuf), style, color_white );
+					va("(%s copied)", dlSizeBuf.data()), style, color_white );
 			}
 		}
 
 		if (xferRate) {
 			UI_DrawProportionalString( leftWidth, 224, 
-				va("%s/Sec", xferRateBuf), style, color_white );
+				va("%s/Sec", xferRateBuf.data()), style, color_white );
 		}
 	}
 }
@@ -171,7 +191,7 @@ to prevent it from blinking away too rapidly on local or lan games.
 void UI_DrawConnectScreen( qboolean overlay ) {
 	char			*s;
 	uiClientState_t	cstate;
-	char			info[MAX_INFO_VALUE];
+	std::array<char, MAX_INFO_VALUE> info{};
 
 	UI_VideoCheck( trap_Milliseconds() );
 
@@ -188,8 +208,8 @@ void UI_DrawConnectScreen( qboolean overlay ) {
 	trap_GetClientState( &cstate );
 
 	info[0] = '\0';
-	if( trap_GetConfigString( CS_SERVERINFO, info, sizeof(info) ) ) {
-		UI_DrawProportionalString( 320, 16, va( "Loading %s", Info_ValueForKey( info, "mapname" ) ), UI_BIGFONT|UI_CENTER|UI_DROPSHADOW, color_white );
+	if( trap_GetConfigString( CS_SERVERINFO, info.data(), static_cast<int>( info.size() ) ) ) {
+		UI_DrawProportionalString( 320, 16, va( "Loading %s", Info_ValueForKey( info.data(), "mapname" ) ), UI_BIGFONT|UI_CENTER|UI_DROPSHADOW, color_white );
 	}
 
 	UI_DrawProportionalString( 320, 64, va("Connecting to %s", cstate.servername), UI_CENTER|UI_SMALLFONT|UI_DROPSHADOW, menu_text_color );
@@ -241,11 +261,11 @@ void UI_DrawConnectScreen( qboolean overlay ) {
 		s = va("Awaiting connection...%i", cstate.connectPacketCount);
 		break;
 	case CA_CONNECTED: {
-		char downloadName[MAX_INFO_VALUE];
+		std::array<char, MAX_INFO_VALUE> downloadName{};
 
-			trap_Cvar_VariableStringBuffer( "cl_downloadName", downloadName, sizeof(downloadName) );
-			if (*downloadName) {
-				UI_DisplayDownloadInfo( downloadName );
+			trap_Cvar_VariableStringBuffer( "cl_downloadName", downloadName.data(), static_cast<int>( downloadName.size() ) );
+			if ( downloadName.front() != '\0' ) {
+				UI_DisplayDownloadInfo( downloadName.data() );
 				return;
 			}
 		}

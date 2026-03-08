@@ -10,7 +10,7 @@ MULTIPLAYER MENU (SERVER BROWSER)
 
 
 #include "ui_local.h"
-#include "../game/q_shared.h"
+#include "../sgame/q_shared.h"
 
 
 #define REFRESH_DELAY			10	  // in ms

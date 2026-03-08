@@ -10,6 +10,8 @@ NETWORK OPTIONS MENU
 
 #include "ui_local.h"
 
+#include <array>
+
 
 #define ART_FRAMEL			"menu/art/frame2_l"
 #define ART_FRAMER			"menu/art/frame1_r"
@@ -24,14 +26,44 @@ NETWORK OPTIONS MENU
 #define ID_BACK				15
 
 
-static const char *rate_items[] = {
+namespace {
+
+std::array<const char *, 6> RateItems = {
 	"<= 28.8K",
 	"33.6K",
 	"56K",
 	"ISDN",
 	"LAN/Cable/xDSL",
-	NULL
+	nullptr
 };
+
+constexpr std::array<int, 5> RateValues = {
+	2500,
+	3000,
+	4000,
+	5000,
+	25000
+};
+
+int NetworkRateIndex( const int rate ) {
+	for( std::size_t index = 0; index < RateValues.size(); ++index ) {
+		if( rate <= RateValues[index] ) {
+			return static_cast<int>( index );
+		}
+	}
+
+	return static_cast<int>( RateValues.size() - 1 );
+}
+
+void ApplySelectedNetworkRate( const int selectedIndex ) {
+	if( selectedIndex < 0 || selectedIndex >= static_cast<int>( RateValues.size() ) ) {
+		return;
+	}
+
+	trap_Cvar_SetValue( "rate", RateValues[selectedIndex] );
+}
+
+}
 
 typedef struct {
 	menuframework_s	menu;
@@ -83,21 +115,7 @@ static void UI_NetworkOptionsMenu_Event( void* ptr, int event ) {
 		break;
 
 	case ID_RATE:
-		if( networkOptionsInfo.rate.curvalue == 0 ) {
-			trap_Cvar_SetValue( "rate", 2500 );
-		}
-		else if( networkOptionsInfo.rate.curvalue == 1 ) {
-			trap_Cvar_SetValue( "rate", 3000 );
-		}
-		else if( networkOptionsInfo.rate.curvalue == 2 ) {
-			trap_Cvar_SetValue( "rate", 4000 );
-		}
-		else if( networkOptionsInfo.rate.curvalue == 3 ) {
-			trap_Cvar_SetValue( "rate", 5000 );
-		}
-		else if( networkOptionsInfo.rate.curvalue == 4 ) {
-			trap_Cvar_SetValue( "rate", 25000 );
-		}
+		ApplySelectedNetworkRate( networkOptionsInfo.rate.curvalue );
 		break;
 
 	case ID_BACK:
@@ -116,7 +134,7 @@ static void UI_NetworkOptionsMenu_Init( void ) {
 	int		y;
 	int		rate;
 
-	memset( &networkOptionsInfo, 0, sizeof(networkOptionsInfo) );
+	networkOptionsInfo = {};
 
 	UI_NetworkOptionsMenu_Cache();
 	networkOptionsInfo.menu.wrapAround = qtrue;
@@ -194,7 +212,7 @@ static void UI_NetworkOptionsMenu_Init( void ) {
 	networkOptionsInfo.rate.generic.id			= ID_RATE;
 	networkOptionsInfo.rate.generic.x			= 400;
 	networkOptionsInfo.rate.generic.y			= y;
-	networkOptionsInfo.rate.itemnames			= rate_items;
+	networkOptionsInfo.rate.itemnames			= RateItems.data();
 
 	networkOptionsInfo.back.generic.type		= MTYPE_BITMAP;
 	networkOptionsInfo.back.generic.name		= ART_BACK0;
@@ -218,21 +236,7 @@ static void UI_NetworkOptionsMenu_Init( void ) {
 	Menu_AddItem( &networkOptionsInfo.menu, ( void * ) &networkOptionsInfo.back );
 
 	rate = trap_Cvar_VariableValue( "rate" );
-	if( rate <= 2500 ) {
-		networkOptionsInfo.rate.curvalue = 0;
-	}
-	else if( rate <= 3000 ) {
-		networkOptionsInfo.rate.curvalue = 1;
-	}
-	else if( rate <= 4000 ) {
-		networkOptionsInfo.rate.curvalue = 2;
-	}
-	else if( rate <= 5000 ) {
-		networkOptionsInfo.rate.curvalue = 3;
-	}
-	else {
-		networkOptionsInfo.rate.curvalue = 4;
-	}
+	networkOptionsInfo.rate.curvalue = NetworkRateIndex( rate );
 }
 
 

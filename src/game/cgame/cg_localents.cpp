@@ -6,10 +6,160 @@
 
 #include "cg_local.h"
 
+#include <algorithm>
+#include <array>
+#include <span>
+
 #define	MAX_LOCAL_ENTITIES	2048
 localEntity_t	cg_localEntities[MAX_LOCAL_ENTITIES];
 localEntity_t	cg_activeLocalEntities;		// double linked list
 localEntity_t	*cg_freeLocalEntities;		// single linked list
+
+static void CG_AddFragment( localEntity_t *le );
+static void CG_AddFadeRGB( localEntity_t *le );
+static void CG_AddMoveScaleFade( localEntity_t *le );
+static void CG_AddScaleFade( localEntity_t *le );
+static void CG_AddFallScaleFade( localEntity_t *le );
+static void CG_AddExplosion( localEntity_t *ex );
+static void CG_AddSpriteExplosion( localEntity_t *le );
+static void CG_AddRefEntity( localEntity_t *le );
+void CG_AddScorePlum( localEntity_t *le );
+#ifdef MISSIONPACK
+void CG_AddKamikaze( localEntity_t *le );
+void CG_AddInvulnerabilityImpact( localEntity_t *le );
+void CG_AddInvulnerabilityJuiced( localEntity_t *le );
+#endif
+
+namespace {
+
+[[nodiscard]] std::span<localEntity_t, MAX_LOCAL_ENTITIES> LocalEntityStorage() noexcept {
+	return cg_localEntities;
+}
+
+void ResetLocalEntity( localEntity_t &localEntity ) noexcept {
+	localEntity = localEntity_t{};
+}
+
+void SubmitRefEntity( refEntity_t &entity ) {
+	if ( intShaderTime ) {
+		trap_R_AddRefEntityToScene2( &entity );
+		return;
+	}
+
+	trap_R_AddRefEntityToScene( &entity );
+}
+
+[[nodiscard]] float LocalEntityLifeFraction( const localEntity_t &localEntity ) noexcept {
+	return ( localEntity.endTime - cg.time ) * localEntity.lifeRate;
+}
+
+void InitializeLocalEntityPool() {
+	auto entities = LocalEntityStorage();
+	std::ranges::fill( entities, localEntity_t{} );
+
+	cg_activeLocalEntities.next = &cg_activeLocalEntities;
+	cg_activeLocalEntities.prev = &cg_activeLocalEntities;
+	cg_freeLocalEntities = entities.data();
+
+	for ( size_t entityIndex = 0; entityIndex + 1 < entities.size(); ++entityIndex ) {
+		entities[entityIndex].next = &entities[entityIndex + 1];
+	}
+}
+
+void LinkActiveLocalEntity( localEntity_t &localEntity ) noexcept {
+	localEntity.next = cg_activeLocalEntities.next;
+	localEntity.prev = &cg_activeLocalEntities;
+	cg_activeLocalEntities.next->prev = &localEntity;
+	cg_activeLocalEntities.next = &localEntity;
+}
+
+void SetPolyVertex( polyVert_t &vertex, const vec3_t position, const float s, const float t, const refEntity_t &entity ) {
+	VectorCopy( position, vertex.xyz );
+	vertex.st[0] = s;
+	vertex.st[1] = t;
+	vertex.modulate[0] = entity.shaderRGBA[0];
+	vertex.modulate[1] = entity.shaderRGBA[1];
+	vertex.modulate[2] = entity.shaderRGBA[2];
+	vertex.modulate[3] = entity.shaderRGBA[3];
+}
+
+#ifdef MISSIONPACK
+[[nodiscard]] refEntity_t KamikazeShockwaveEntity( const refEntity_t &sourceEntity ) noexcept {
+	refEntity_t shockwave{};
+	shockwave.hModel = cgs.media.kamikazeShockWave;
+	shockwave.reType = RT_MODEL;
+	shockwave.shaderTime = sourceEntity.shaderTime;
+	VectorCopy( sourceEntity.origin, shockwave.origin );
+	return shockwave;
+}
+
+void SetUniformShockwaveFade( refEntity_t &shockwave, const byte color ) noexcept {
+	shockwave.shaderRGBA[0] = color;
+	shockwave.shaderRGBA[1] = color;
+	shockwave.shaderRGBA[2] = color;
+	shockwave.shaderRGBA[3] = color;
+}
+#endif
+
+void DispatchLocalEntity( localEntity_t *localEntity ) {
+	switch ( localEntity->leType ) {
+	default:
+		CG_Error( "Bad leType: %i", localEntity->leType );
+		break;
+
+	case LE_MARK:
+		break;
+
+	case LE_SPRITE_EXPLOSION:
+		CG_AddSpriteExplosion( localEntity );
+		break;
+
+	case LE_EXPLOSION:
+		CG_AddExplosion( localEntity );
+		break;
+
+	case LE_FRAGMENT:
+		CG_AddFragment( localEntity );
+		break;
+
+	case LE_MOVE_SCALE_FADE:
+		CG_AddMoveScaleFade( localEntity );
+		break;
+
+	case LE_FADE_RGB:
+		CG_AddFadeRGB( localEntity );
+		break;
+
+	case LE_FALL_SCALE_FADE:
+		CG_AddFallScaleFade( localEntity );
+		break;
+
+	case LE_SCALE_FADE:
+		CG_AddScaleFade( localEntity );
+		break;
+
+	case LE_SCOREPLUM:
+		CG_AddScorePlum( localEntity );
+		break;
+
+#ifdef MISSIONPACK
+	case LE_KAMIKAZE:
+		CG_AddKamikaze( localEntity );
+		break;
+	case LE_INVULIMPACT:
+		CG_AddInvulnerabilityImpact( localEntity );
+		break;
+	case LE_INVULJUICED:
+		CG_AddInvulnerabilityJuiced( localEntity );
+		break;
+#endif
+	case LE_SHOWREFENTITY:
+		CG_AddRefEntity( localEntity );
+		break;
+	}
+}
+
+} // namespace
 
 /*
 ===================
@@ -19,15 +169,7 @@ This is called at startup and for tournement restarts
 ===================
 */
 void	CG_InitLocalEntities( void ) {
-	int		i;
-
-	memset( cg_localEntities, 0, sizeof( cg_localEntities ) );
-	cg_activeLocalEntities.next = &cg_activeLocalEntities;
-	cg_activeLocalEntities.prev = &cg_activeLocalEntities;
-	cg_freeLocalEntities = cg_localEntities;
-	for ( i = 0 ; i < MAX_LOCAL_ENTITIES - 1 ; i++ ) {
-		cg_localEntities[i].next = &cg_localEntities[i+1];
-	}
+	InitializeLocalEntityPool();
 }
 
 
@@ -69,13 +211,10 @@ localEntity_t	*CG_AllocLocalEntity( void ) {
 	le = cg_freeLocalEntities;
 	cg_freeLocalEntities = cg_freeLocalEntities->next;
 
-	memset( le, 0, sizeof( *le ) );
+	ResetLocalEntity( *le );
 
 	// link into the active list
-	le->next = cg_activeLocalEntities.next;
-	le->prev = &cg_activeLocalEntities;
-	cg_activeLocalEntities.next->prev = le;
-	cg_activeLocalEntities.next = le;
+	LinkActiveLocalEntity( *le );
 	return le;
 }
 
@@ -311,27 +450,25 @@ CG_AddFadeRGB
 */
 static void CG_AddFadeRGB( localEntity_t *le ) {
 	refEntity_t *re;
-	float c;
+	float fade;
 
 	re = &le->refEntity;
 
-	c = ( le->endTime - cg.time ) * le->lifeRate;
+	fade = LocalEntityLifeFraction( *le );
 
 	if ( re->reType == RT_RAIL_CORE && cg_railTrailRadius.integer && linearLight ) {
-		trap_R_AddLinearLightToScene( re->origin, re->oldorigin, cg_railTrailRadius.value, le->color[0]*c, le->color[1]*c, le->color[2]*c );
+		trap_R_AddLinearLightToScene( re->origin, re->oldorigin, cg_railTrailRadius.value,
+			le->color[0] * fade, le->color[1] * fade, le->color[2] * fade );
 	}
 
-	c *= 0xff;
+	fade *= 0xff;
 
-	re->shaderRGBA[0] = le->color[0] * c;
-	re->shaderRGBA[1] = le->color[1] * c;
-	re->shaderRGBA[2] = le->color[2] * c;
-	re->shaderRGBA[3] = le->color[3] * c;
+	re->shaderRGBA[0] = le->color[0] * fade;
+	re->shaderRGBA[1] = le->color[1] * fade;
+	re->shaderRGBA[2] = le->color[2] * fade;
+	re->shaderRGBA[3] = le->color[3] * fade;
 
-	if ( intShaderTime )
-		trap_R_AddRefEntityToScene2( re );
-	else
-		trap_R_AddRefEntityToScene( re );
+	SubmitRefEntity( *re );
 }
 
 
@@ -342,7 +479,7 @@ CG_AddMoveScaleFade
 */
 static void CG_AddMoveScaleFade( localEntity_t *le ) {
 	refEntity_t	*re;
-	float		c;
+	float		fade;
 	vec3_t		delta;
 	float		len;
 
@@ -350,17 +487,17 @@ static void CG_AddMoveScaleFade( localEntity_t *le ) {
 
 	if ( le->fadeInTime > le->startTime && cg.time < le->fadeInTime ) {
 		// fade / grow time
-		c = 1.0 - (float) ( le->fadeInTime - cg.time ) / ( le->fadeInTime - le->startTime );
+		fade = 1.0 - (float) ( le->fadeInTime - cg.time ) / ( le->fadeInTime - le->startTime );
 	}
 	else {
 		// fade / grow time
-		c = ( le->endTime - cg.time ) * le->lifeRate;
+		fade = LocalEntityLifeFraction( *le );
 	}
 
-	re->shaderRGBA[3] = 0xff * c * le->color[3];
+	re->shaderRGBA[3] = 0xff * fade * le->color[3];
 
 	if ( !( le->leFlags & LEF_PUFF_DONT_SCALE ) ) {
-		re->radius = le->radius * ( 1.0 - c ) + 8;
+		re->radius = le->radius * ( 1.0 - fade ) + 8;
 	}
 
 	BG_EvaluateTrajectory( &le->pos, cg.time, re->origin );
@@ -374,10 +511,7 @@ static void CG_AddMoveScaleFade( localEntity_t *le ) {
 		return;
 	}
 
-	if ( intShaderTime )
-		trap_R_AddRefEntityToScene2( re );
-	else
-		trap_R_AddRefEntityToScene( re );
+	SubmitRefEntity( *re );
 }
 
 
@@ -388,11 +522,10 @@ CG_EmitPolyVerts
 */
 static void CG_EmitPolyVerts( const refEntity_t *re )
 {
-	polyVert_t	verts[4];
+	std::array<polyVert_t, 4> verts{};
 	float		sinR, cosR;
 	float		angle;
 	vec3_t		left, up;
-	int			i;
 
 	if ( re->rotation )
 	{
@@ -412,39 +545,21 @@ static void CG_EmitPolyVerts( const refEntity_t *re )
 		VectorScale( cg.refdef.viewaxis[2], re->radius, up );
 	}
 
-	verts[0].xyz[0] = re->origin[0] + left[0] + up[0];
-	verts[0].xyz[1] = re->origin[1] + left[1] + up[1];
-	verts[0].xyz[2] = re->origin[2] + left[2] + up[2];
-	verts[0].st[0] = 0.0;
-	verts[0].st[1] = 0.0;
+	vec3_t position;
 
-	verts[1].xyz[0] = re->origin[0] - left[0] + up[0];
-	verts[1].xyz[1] = re->origin[1] - left[1] + up[1];
-	verts[1].xyz[2] = re->origin[2] - left[2] + up[2];
-	verts[1].st[0] = 1.0;
-	verts[1].st[1] = 0.0;
+	VectorSet( position, re->origin[0] + left[0] + up[0], re->origin[1] + left[1] + up[1], re->origin[2] + left[2] + up[2] );
+	SetPolyVertex( verts[0], position, 0.0f, 0.0f, *re );
 
-	verts[2].xyz[0] = re->origin[0] - left[0] - up[0];
-	verts[2].xyz[1] = re->origin[1] - left[1] - up[1];
-	verts[2].xyz[2] = re->origin[2] - left[2] - up[2];
-	verts[2].st[0] = 1.0;
-	verts[2].st[1] = 1.0;
+	VectorSet( position, re->origin[0] - left[0] + up[0], re->origin[1] - left[1] + up[1], re->origin[2] - left[2] + up[2] );
+	SetPolyVertex( verts[1], position, 1.0f, 0.0f, *re );
 
-	verts[3].xyz[0] = re->origin[0] + left[0] - up[0];
-	verts[3].xyz[1] = re->origin[1] + left[1] - up[1];
-	verts[3].xyz[2] = re->origin[2] + left[2] - up[2];
-	verts[3].st[0] = 0.0;
-	verts[3].st[1] = 1.0;
+	VectorSet( position, re->origin[0] - left[0] - up[0], re->origin[1] - left[1] - up[1], re->origin[2] - left[2] - up[2] );
+	SetPolyVertex( verts[2], position, 1.0f, 1.0f, *re );
 
-	for ( i = 0; i < 4; i++ )
-	{
-		verts[i].modulate[0] = re->shaderRGBA[0];
-		verts[i].modulate[1] = re->shaderRGBA[1];
-		verts[i].modulate[2] = re->shaderRGBA[2];
-		verts[i].modulate[3] = re->shaderRGBA[3];
-	}
+	VectorSet( position, re->origin[0] + left[0] - up[0], re->origin[1] + left[1] - up[1], re->origin[2] + left[2] - up[2] );
+	SetPolyVertex( verts[3], position, 0.0f, 1.0f, *re );
 
-	trap_R_AddPolyToScene( re->customShader, 4, verts );
+	trap_R_AddPolyToScene( re->customShader, static_cast<int>( verts.size() ), verts.data() );
 }
 
 
@@ -459,17 +574,17 @@ There are often many of these, so it needs to be simple.
 */
 static void CG_AddScaleFade( localEntity_t *le ) {
 	refEntity_t	*re;
-	float		c;
+	float		fade;
 	vec3_t		delta;
 	float		len;
 
 	re = &le->refEntity;
 
 	// fade / grow time
-	c = ( le->endTime - cg.time ) * le->lifeRate;
+	fade = LocalEntityLifeFraction( *le );
 
-	re->shaderRGBA[3] = 0xff * c * le->color[3];
-	re->radius = le->radius * ( 1.0 - c ) + 8;
+	re->shaderRGBA[3] = 0xff * fade * le->color[3];
+	re->radius = le->radius * ( 1.0 - fade ) + 8;
 
 	// if the view would be "inside" the sprite, kill the sprite
 	// so it doesn't add too much overdraw
@@ -499,20 +614,20 @@ There are often 100+ of these, so it needs to be simple.
 */
 static void CG_AddFallScaleFade( localEntity_t *le ) {
 	refEntity_t	*re;
-	float		c;
+	float		fade;
 	vec3_t		delta;
 	float		len;
 
 	re = &le->refEntity;
 
 	// fade time
-	c = ( le->endTime - cg.time ) * le->lifeRate;
+	fade = LocalEntityLifeFraction( *le );
 
-	re->shaderRGBA[3] = 0xff * c * le->color[3];
+	re->shaderRGBA[3] = 0xff * fade * le->color[3];
 
-	re->origin[2] = le->pos.trBase[2] - ( 1.0 - c ) * le->pos.trDelta[2];
+	re->origin[2] = le->pos.trBase[2] - ( 1.0 - fade ) * le->pos.trDelta[2];
 
-	re->radius = le->radius * ( 1.0 - c ) + 16;
+	re->radius = le->radius * ( 1.0 - fade ) + 16;
 
 	// if the view would be "inside" the sprite, kill the sprite
 	// so it doesn't add too much overdraw
@@ -541,10 +656,7 @@ static void CG_AddExplosion( localEntity_t *ex ) {
 	ent = &ex->refEntity;
 
 	// add the entity
-	if ( intShaderTime )
-		trap_R_AddRefEntityToScene2( ent );
-	else
-		trap_R_AddRefEntityToScene( ent );
+	SubmitRefEntity( *ent );
 
 	// add the dlight
 	if ( ex->light ) {
@@ -569,27 +681,24 @@ CG_AddSpriteExplosion
 */
 static void CG_AddSpriteExplosion( localEntity_t *le ) {
 	refEntity_t	re;
-	float c;
+	float fade;
 
 	re = le->refEntity;
 
-	c = ( le->endTime - cg.time ) / ( float ) ( le->endTime - le->startTime );
-	if ( c > 1 ) {
-		c = 1.0;	// can happen during connection problems
+	fade = ( le->endTime - cg.time ) / ( float ) ( le->endTime - le->startTime );
+	if ( fade > 1 ) {
+		fade = 1.0;	// can happen during connection problems
 	}
 
 	re.shaderRGBA[0] = 0xff;
 	re.shaderRGBA[1] = 0xff;
 	re.shaderRGBA[2] = 0xff;
-	re.shaderRGBA[3] = 0xff * c * 0.33;
+	re.shaderRGBA[3] = 0xff * fade * 0.33;
 
 	re.reType = RT_SPRITE;
-	re.radius = 42 * ( 1.0 - c ) + 30;
+	re.radius = 42 * ( 1.0 - fade ) + 30;
 
-	if ( intShaderTime )
-		trap_R_AddRefEntityToScene2( &re );
-	else
-		trap_R_AddRefEntityToScene( &re );
+	SubmitRefEntity( re );
 
 	// add the dlight
 	if ( le->light ) {
@@ -634,11 +743,7 @@ void CG_AddKamikaze( localEntity_t *le ) {
 			le->leFlags |= LEF_SOUND1;
 		}
 		// 1st kamikaze shockwave
-		memset(&shockwave, 0, sizeof(shockwave));
-		shockwave.hModel = cgs.media.kamikazeShockWave;
-		shockwave.reType = RT_MODEL;
-		shockwave.shaderTime = re->shaderTime;
-		VectorCopy(re->origin, shockwave.origin);
+		shockwave = KamikazeShockwaveEntity( *re );
 
 		c = (float)(t - KAMI_SHOCKWAVE_STARTTIME) / (float)(KAMI_SHOCKWAVE_ENDTIME - KAMI_SHOCKWAVE_STARTTIME);
 		VectorScale( axis[0], c * KAMI_SHOCKWAVE_MAXRADIUS / KAMI_SHOCKWAVEMODEL_RADIUS, shockwave.axis[0] );
@@ -652,11 +757,7 @@ void CG_AddKamikaze( localEntity_t *le ) {
 		else {
 			c = 0;
 		}
-		c *= 0xff;
-		shockwave.shaderRGBA[0] = 0xff - c;
-		shockwave.shaderRGBA[1] = 0xff - c;
-		shockwave.shaderRGBA[2] = 0xff - c;
-		shockwave.shaderRGBA[3] = 0xff - c;
+		SetUniformShockwaveFade( shockwave, static_cast<byte>( 0xff - c * 0xff ) );
 
 		trap_R_AddRefEntityToScene( &shockwave );
 	}
@@ -703,11 +804,7 @@ void CG_AddKamikaze( localEntity_t *le ) {
 		else {
 			c = 0;
 		}
-		memset(&shockwave, 0, sizeof(shockwave));
-		shockwave.hModel = cgs.media.kamikazeShockWave;
-		shockwave.reType = RT_MODEL;
-		shockwave.shaderTime = re->shaderTime;
-		VectorCopy(re->origin, shockwave.origin);
+		shockwave = KamikazeShockwaveEntity( *re );
 
 		test[0] = le->angles.trBase[0];
 		test[1] = le->angles.trBase[1];
@@ -726,11 +823,7 @@ void CG_AddKamikaze( localEntity_t *le ) {
 		else {
 			c = 0;
 		}
-		c *= 0xff;
-		shockwave.shaderRGBA[0] = 0xff - c;
-		shockwave.shaderRGBA[1] = 0xff - c;
-		shockwave.shaderRGBA[2] = 0xff - c;
-		shockwave.shaderRGBA[3] = 0xff - c;
+		SetUniformShockwaveFade( shockwave, static_cast<byte>( 0xff - c * 0xff ) );
 
 		trap_R_AddRefEntityToScene( &shockwave );
 	}
@@ -742,7 +835,7 @@ CG_AddInvulnerabilityImpact
 ===================
 */
 void CG_AddInvulnerabilityImpact( localEntity_t *le ) {
-	trap_R_AddRefEntityToScene( &le->refEntity );
+	SubmitRefEntity( le->refEntity );
 }
 
 /*
@@ -764,7 +857,7 @@ void CG_AddInvulnerabilityJuiced( localEntity_t *le ) {
 		CG_GibPlayer( le->refEntity.origin );
 	}
 	else {
-		trap_R_AddRefEntityToScene( &le->refEntity );
+		SubmitRefEntity( le->refEntity );
 	}
 }
 #endif
@@ -780,7 +873,7 @@ static void CG_AddRefEntity( localEntity_t *le ) {
 		CG_FreeLocalEntity( le );
 		return;
 	}
-	trap_R_AddRefEntityToScene( &le->refEntity );
+	SubmitRefEntity( le->refEntity );
 }
 
 
@@ -896,64 +989,6 @@ void CG_AddLocalEntities( void ) {
 			CG_FreeLocalEntity( le );
 			continue;
 		}
-		switch ( le->leType ) {
-		default:
-			CG_Error( "Bad leType: %i", le->leType );
-			break;
-
-		case LE_MARK:
-			break;
-
-		case LE_SPRITE_EXPLOSION:
-			CG_AddSpriteExplosion( le );
-			break;
-
-		case LE_EXPLOSION:
-			CG_AddExplosion( le );
-			break;
-
-		case LE_FRAGMENT:			// gibs and brass
-			CG_AddFragment( le );
-			break;
-
-		case LE_MOVE_SCALE_FADE:	// water bubbles, plasma trails, smoke puff
-			CG_AddMoveScaleFade( le );
-			break;
-
-		case LE_FADE_RGB:			// teleporters, railtrails
-			CG_AddFadeRGB( le );
-			break;
-
-		case LE_FALL_SCALE_FADE:	// gib blood trails
-			CG_AddFallScaleFade( le );
-			break;
-
-		case LE_SCALE_FADE:			// rocket trails
-			CG_AddScaleFade( le );
-			break;
-
-		case LE_SCOREPLUM:
-			CG_AddScorePlum( le );
-			break;
-
-#ifdef MISSIONPACK
-		case LE_KAMIKAZE:
-			CG_AddKamikaze( le );
-			break;
-		case LE_INVULIMPACT:
-			CG_AddInvulnerabilityImpact( le );
-			break;
-		case LE_INVULJUICED:
-			CG_AddInvulnerabilityJuiced( le );
-			break;
-#endif
-		case LE_SHOWREFENTITY:
-			CG_AddRefEntity( le );
-			break;
-		}
+		DispatchLocalEntity( le );
 	}
 }
-
-
-
-

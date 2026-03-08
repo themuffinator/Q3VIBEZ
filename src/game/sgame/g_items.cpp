@@ -2,6 +2,9 @@
 //
 #include "g_local.h"
 
+#include <algorithm>
+#include <array>
+
 /*
 
   Items are any object that a player can touch to gain some effect.
@@ -36,6 +39,45 @@
 #define	RESPAWN_POWERUP		120000
 
 //======================================================================
+
+static std::array<qboolean, MAX_ITEMS> itemRegistered{};
+
+namespace {
+
+#ifdef MISSIONPACK
+float HandicapForClient( const int client_num ) {
+	std::array<char, MAX_INFO_STRING> userinfo{};
+	trap_GetUserinfo( client_num, userinfo.data(), userinfo.size() );
+
+	float handicap = atof( Info_ValueForKey( userinfo.data(), "handicap" ) );
+	if ( handicap <= 0.0f || handicap > 100.0f ) {
+		handicap = 100.0f;
+	}
+
+	return handicap;
+}
+
+void ResetAmmoRegenTimes( gclient_t &client ) {
+	std::fill_n( client.ammoTimes, WP_NUM_WEAPONS, 0 );
+}
+#endif
+
+void WarnIfMissingRegisteredItem( const char *item_name, const char *warning ) {
+	const gitem_t *item = BG_FindItem( item_name );
+	if ( !item || !itemRegistered[item - bg_itemlist] ) {
+		G_Printf( "%s", warning );
+	}
+}
+
+#ifdef MISSIONPACK
+void WarnIfMissingEntityClassname( const char *classname, const char *warning ) {
+	if ( !G_Find( nullptr, FOFS( classname ), classname ) ) {
+		G_Printf( "%s", warning );
+	}
+}
+#endif
+
+} // namespace
 
 int SpawnTime( gentity_t *ent, qboolean firstSpawn ) 
 {
@@ -154,9 +196,8 @@ int Pickup_Powerup( gentity_t *ent, gentity_t *other ) {
 
 #ifdef MISSIONPACK
 int Pickup_PersistantPowerup( gentity_t *ent, gentity_t *other ) {
-	int		clientNum;
-	char	userinfo[MAX_INFO_STRING];
-	float	handicap;
+	const int client_num = other->client->ps.clientNum;
+	const float handicap = HandicapForClient( client_num );
 	int		max;
 
 	other->client->ps.stats[STAT_PERSISTANT_POWERUP] = ent->item - bg_itemlist;
@@ -164,12 +205,6 @@ int Pickup_PersistantPowerup( gentity_t *ent, gentity_t *other ) {
 
 	switch( ent->item->giTag ) {
 	case PW_GUARD:
-		clientNum = other->client->ps.clientNum;
-		trap_GetUserinfo( clientNum, userinfo, sizeof(userinfo) );
-		handicap = atof( Info_ValueForKey( userinfo, "handicap" ) );
-		if( handicap<=0.0f || handicap>100.0f) {
-			handicap = 100.0f;
-		}
 		max = (int)(2 *  handicap);
 
 		other->health = max;
@@ -181,42 +216,18 @@ int Pickup_PersistantPowerup( gentity_t *ent, gentity_t *other ) {
 		break;
 
 	case PW_SCOUT:
-		clientNum = other->client->ps.clientNum;
-		trap_GetUserinfo( clientNum, userinfo, sizeof(userinfo) );
-		handicap = atof( Info_ValueForKey( userinfo, "handicap" ) );
-		if( handicap<=0.0f || handicap>100.0f) {
-			handicap = 100.0f;
-		}
 		other->client->pers.maxHealth = handicap;
 		other->client->ps.stats[STAT_ARMOR] = 0;
 		break;
 
 	case PW_DOUBLER:
-		clientNum = other->client->ps.clientNum;
-		trap_GetUserinfo( clientNum, userinfo, sizeof(userinfo) );
-		handicap = atof( Info_ValueForKey( userinfo, "handicap" ) );
-		if( handicap<=0.0f || handicap>100.0f) {
-			handicap = 100.0f;
-		}
 		other->client->pers.maxHealth = handicap;
 		break;
 	case PW_AMMOREGEN:
-		clientNum = other->client->ps.clientNum;
-		trap_GetUserinfo( clientNum, userinfo, sizeof(userinfo) );
-		handicap = atof( Info_ValueForKey( userinfo, "handicap" ) );
-		if( handicap<=0.0f || handicap>100.0f) {
-			handicap = 100.0f;
-		}
 		other->client->pers.maxHealth = handicap;
-		memset(other->client->ammoTimes, 0, sizeof(other->client->ammoTimes));
+		ResetAmmoRegenTimes( *other->client );
 		break;
 	default:
-		clientNum = other->client->ps.clientNum;
-		trap_GetUserinfo( clientNum, userinfo, sizeof(userinfo) );
-		handicap = atof( Info_ValueForKey( userinfo, "handicap" ) );
-		if( handicap<=0.0f || handicap>100.0f) {
-			handicap = 100.0f;
-		}
 		other->client->pers.maxHealth = handicap;
 		break;
 	}
@@ -762,8 +773,6 @@ void FinishSpawningItem( gentity_t *ent ) {
 }
 
 
-qboolean	itemRegistered[MAX_ITEMS];
-
 /*
 ==================
 G_CheckTeamItems
@@ -775,75 +784,25 @@ void G_CheckTeamItems( void ) {
 	Team_InitGame();
 
 	if( g_gametype.integer == GT_CTF ) {
-		gitem_t	*item;
-
-		// check for the two flags
-		item = BG_FindItem( "Red Flag" );
-		if ( !item || !itemRegistered[ item - bg_itemlist ] ) {
-			G_Printf( S_COLOR_YELLOW "WARNING: No team_CTF_redflag in map\n" );
-		}
-		item = BG_FindItem( "Blue Flag" );
-		if ( !item || !itemRegistered[ item - bg_itemlist ] ) {
-			G_Printf( S_COLOR_YELLOW "WARNING: No team_CTF_blueflag in map\n" );
-		}
+		WarnIfMissingRegisteredItem( "Red Flag", S_COLOR_YELLOW "WARNING: No team_CTF_redflag in map\n" );
+		WarnIfMissingRegisteredItem( "Blue Flag", S_COLOR_YELLOW "WARNING: No team_CTF_blueflag in map\n" );
 	}
 #ifdef MISSIONPACK
 	if( g_gametype.integer == GT_1FCTF ) {
-		gitem_t	*item;
-
-		// check for all three flags
-		item = BG_FindItem( "Red Flag" );
-		if ( !item || !itemRegistered[ item - bg_itemlist ] ) {
-			G_Printf( S_COLOR_YELLOW "WARNING: No team_CTF_redflag in map\n" );
-		}
-		item = BG_FindItem( "Blue Flag" );
-		if ( !item || !itemRegistered[ item - bg_itemlist ] ) {
-			G_Printf( S_COLOR_YELLOW "WARNING: No team_CTF_blueflag in map\n" );
-		}
-		item = BG_FindItem( "Neutral Flag" );
-		if ( !item || !itemRegistered[ item - bg_itemlist ] ) {
-			G_Printf( S_COLOR_YELLOW "WARNING: No team_CTF_neutralflag in map\n" );
-		}
+		WarnIfMissingRegisteredItem( "Red Flag", S_COLOR_YELLOW "WARNING: No team_CTF_redflag in map\n" );
+		WarnIfMissingRegisteredItem( "Blue Flag", S_COLOR_YELLOW "WARNING: No team_CTF_blueflag in map\n" );
+		WarnIfMissingRegisteredItem( "Neutral Flag", S_COLOR_YELLOW "WARNING: No team_CTF_neutralflag in map\n" );
 	}
 
 	if( g_gametype.integer == GT_OBELISK ) {
-		gentity_t	*ent;
-
-		// check for the two obelisks
-		ent = NULL;
-		ent = G_Find( ent, FOFS(classname), "team_redobelisk" );
-		if( !ent ) {
-			G_Printf( S_COLOR_YELLOW "WARNING: No team_redobelisk in map\n" );
-		}
-
-		ent = NULL;
-		ent = G_Find( ent, FOFS(classname), "team_blueobelisk" );
-		if( !ent ) {
-			G_Printf( S_COLOR_YELLOW "WARNING: No team_blueobelisk in map\n" );
-		}
+		WarnIfMissingEntityClassname( "team_redobelisk", S_COLOR_YELLOW "WARNING: No team_redobelisk in map\n" );
+		WarnIfMissingEntityClassname( "team_blueobelisk", S_COLOR_YELLOW "WARNING: No team_blueobelisk in map\n" );
 	}
 
 	if( g_gametype.integer == GT_HARVESTER ) {
-		gentity_t	*ent;
-
-		// check for all three obelisks
-		ent = NULL;
-		ent = G_Find( ent, FOFS(classname), "team_redobelisk" );
-		if( !ent ) {
-			G_Printf( S_COLOR_YELLOW "WARNING: No team_redobelisk in map\n" );
-		}
-
-		ent = NULL;
-		ent = G_Find( ent, FOFS(classname), "team_blueobelisk" );
-		if( !ent ) {
-			G_Printf( S_COLOR_YELLOW "WARNING: No team_blueobelisk in map\n" );
-		}
-
-		ent = NULL;
-		ent = G_Find( ent, FOFS(classname), "team_neutralobelisk" );
-		if( !ent ) {
-			G_Printf( S_COLOR_YELLOW "WARNING: No team_neutralobelisk in map\n" );
-		}
+		WarnIfMissingEntityClassname( "team_redobelisk", S_COLOR_YELLOW "WARNING: No team_redobelisk in map\n" );
+		WarnIfMissingEntityClassname( "team_blueobelisk", S_COLOR_YELLOW "WARNING: No team_blueobelisk in map\n" );
+		WarnIfMissingEntityClassname( "team_neutralobelisk", S_COLOR_YELLOW "WARNING: No team_neutralobelisk in map\n" );
 	}
 #endif
 }
@@ -854,7 +813,7 @@ ClearRegisteredItems
 ==============
 */
 void ClearRegisteredItems( void ) {
-	memset( itemRegistered, 0, sizeof( itemRegistered ) );
+	itemRegistered.fill( qfalse );
 
 	// players always start with the base weapon
 	RegisterItem( BG_FindItemForWeapon( WP_MACHINEGUN ) );
@@ -891,7 +850,7 @@ so the client will know which ones to precache
 ===============
 */
 void SaveRegisteredItems( void ) {
-	char	string[MAX_ITEMS+1];
+	std::array<char, MAX_ITEMS + 1> string{};
 	int		i;
 	int		count;
 
@@ -904,10 +863,10 @@ void SaveRegisteredItems( void ) {
 			string[i] = '0';
 		}
 	}
-	string[ bg_numItems ] = 0;
+	string[ bg_numItems ] = '\0';
 
 	G_Printf( "%i items registered\n", count );
-	trap_SetConfigstring(CS_ITEMS, string);
+	trap_SetConfigstring( CS_ITEMS, string.data() );
 }
 
 /*
@@ -917,10 +876,10 @@ G_ItemDisabled
 */
 int G_ItemDisabled( gitem_t *item ) {
 
-	char name[128];
+	std::array<char, 128> name{};
 
-	Com_sprintf(name, sizeof(name), "disable_%s", item->classname);
-	return trap_Cvar_VariableIntegerValue( name );
+	Com_sprintf( name.data(), name.size(), "disable_%s", item->classname );
+	return trap_Cvar_VariableIntegerValue( name.data() );
 }
 
 /*

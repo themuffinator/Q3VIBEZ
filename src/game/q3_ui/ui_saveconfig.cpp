@@ -10,6 +10,8 @@ SAVE CONFIG MENU
 
 #include "ui_local.h"
 
+#include <array>
+
 
 #define ART_BACK0			"menu/art/back_0"
 #define ART_BACK1			"menu/art/back_1"	
@@ -55,7 +57,7 @@ UI_SaveConfigMenu_SaveEvent
 ===============
 */
 static void UI_SaveConfigMenu_SaveEvent( void *ptr, int event ) {
-	char	configname[MAX_QPATH];
+	std::array<char, MAX_QPATH> configname{};
 
 	if( event != QM_ACTIVATED ) {
 		return;
@@ -65,8 +67,8 @@ static void UI_SaveConfigMenu_SaveEvent( void *ptr, int event ) {
 		return;
 	}
 
-	COM_StripExtension( saveConfig.savename.field.buffer, configname, sizeof( configname ) );
-	trap_Cmd_ExecuteText( EXEC_APPEND, va( "writeconfig %s.cfg\n", configname ) );
+	COM_StripExtension( saveConfig.savename.field.buffer, configname.data(), static_cast<int>( configname.size() ) );
+	trap_Cmd_ExecuteText( EXEC_APPEND, va( "writeconfig %s.cfg\n", configname.data() ) );
 	UI_PopMenu();
 }
 
@@ -104,7 +106,7 @@ UI_SaveConfigMenu_Init
 =================
 */
 static void UI_SaveConfigMenu_Init( void ) {
-	memset( &saveConfig, 0, sizeof(saveConfig) );
+	saveConfig = {};
 
 	UI_SaveConfigMenu_Cache();
 	saveConfig.menu.wrapAround = qtrue;

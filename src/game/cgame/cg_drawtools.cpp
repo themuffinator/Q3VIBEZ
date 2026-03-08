@@ -3,6 +3,46 @@
 // cg_drawtools.c -- helper functions called by cg_draw, cg_scoreboard, cg_info, etc
 #include "cg_local.h"
 
+#include <algorithm>
+#include <array>
+
+namespace {
+
+void ResetRenderColor() {
+	trap_R_SetColor( nullptr );
+}
+
+[[nodiscard]] bool IsQColorSequence( const byte *text ) noexcept {
+	return *text == Q_COLOR_ESCAPE && text[1] != '\0' && text[1] != '^';
+}
+
+[[nodiscard]] float *EvaluateFadeColor( const int startMsec, const int totalMsec, const int fadeMsec, vec4_t color ) noexcept {
+	if ( startMsec == 0 ) {
+		return nullptr;
+	}
+
+	const int elapsedMsec = cg.time - startMsec;
+	if ( elapsedMsec >= totalMsec ) {
+		return nullptr;
+	}
+
+	color[3] = totalMsec - elapsedMsec < fadeMsec ? ( totalMsec - elapsedMsec ) * 1.0f / static_cast<float>( fadeMsec ) : 1.0f;
+	color[0] = color[1] = color[2] = 1.0f;
+	return color;
+}
+
+[[nodiscard]] float NormalizedHealthChannel( const int health, const int minHealth, const int maxHealth ) noexcept {
+	if ( health <= minHealth ) {
+		return 0.0f;
+	}
+	if ( health >= maxHealth ) {
+		return 1.0f;
+	}
+	return static_cast<float>( health - minHealth ) / static_cast<float>( maxHealth - minHealth );
+}
+
+} // namespace
+
 /*
 ================
 CG_AdjustFrom640
@@ -33,7 +73,7 @@ void CG_FillRect( float x, float y, float width, float height, const float *colo
 	CG_AdjustFrom640( &x, &y, &width, &height );
 	trap_R_DrawStretchPic( x, y, width, height, 0, 0, 0, 0, cgs.media.whiteShader );
 
-	trap_R_SetColor( NULL );
+	ResetRenderColor();
 }
 
 
@@ -46,7 +86,7 @@ void CG_FillScreen( const float *color )
 {
 	trap_R_SetColor( color );
 	trap_R_DrawStretchPic( 0, 0, cgs.glconfig.vidWidth, cgs.glconfig.vidHeight, 0, 0, 0, 0, cgs.media.whiteShader );
-	trap_R_SetColor( NULL );
+	ResetRenderColor();
 }
 
 
@@ -86,7 +126,7 @@ void CG_DrawRect( float x, float y, float width, float height, float size, const
 	CG_DrawTopBottom(x, y, width, height, size);
 	CG_DrawSides(x, y, width, height, size);
 
-	trap_R_SetColor( NULL );
+	ResetRenderColor();
 }
 
 
@@ -190,7 +230,7 @@ void CG_DrawStringExt( int x, int y, const char *string, const float *setColor,
 	while ( *s && cnt < maxChars) {
 		if ( Q_IsColorString( s ) ) {
 			if ( !forceColor ) {
-				memcpy( color, g_color_table[ColorIndex(*(s+1))], sizeof( color ) );
+				Vector4Copy( g_color_table[ColorIndex(*(s+1))], color );
 				color[3] = setColor[3];
 				trap_R_SetColor( color );
 			}
@@ -202,7 +242,7 @@ void CG_DrawStringExt( int x, int y, const char *string, const float *setColor,
 		cnt++;
 		s++;
 	}
-	trap_R_SetColor( NULL );
+	ResetRenderColor();
 }
 
 
@@ -231,6 +271,95 @@ static font_t bigchars;
 static font_t numbers;
 static const font_t *font = &bigchars;
 static const font_metric_t *metrics = &bigchars.metrics[0];
+
+namespace {
+
+constexpr size_t kFontFileBufferSize = 8000;
+
+struct FontShaderEntry {
+	std::array<char, MAX_QPATH> name{};
+	int threshold = 0;
+};
+
+struct GlyphLayout {
+	const float *texCoords = nullptr;
+	float drawWidth = 0.0f;
+	float endX = 0.0f;
+};
+
+using FontShaderEntries = std::array<FontShaderEntry, MAX_FONT_SHADERS>;
+
+[[nodiscard]] const char *ParseFontToken( char **text, const qboolean allowLineBreaks ) {
+	return COM_ParseExt( text, allowLineBreaks );
+}
+
+[[nodiscard]] bool ParseRequiredFontToken( char **text, const qboolean allowLineBreaks, const char *errorMessage, const char *&token ) {
+	token = ParseFontToken( text, allowLineBreaks );
+	if ( token[0] != '\0' ) {
+		return true;
+	}
+
+	Com_Printf( "%s\n", errorMessage );
+	return false;
+}
+
+[[nodiscard]] bool ParseRequiredFontFloat( char **text, const qboolean allowLineBreaks, const char *errorMessage, float &value ) {
+	const char *token = nullptr;
+	if ( !ParseRequiredFontToken( text, allowLineBreaks, errorMessage, token ) ) {
+		return false;
+	}
+
+	value = atof( token );
+	return true;
+}
+
+[[nodiscard]] bool ParsePositiveFontFloat( char **text, const qboolean allowLineBreaks, const char *errorMessage, float &value ) {
+	if ( !ParseRequiredFontFloat( text, allowLineBreaks, errorMessage, value ) ) {
+		return false;
+	}
+
+	if ( value > 0.0f ) {
+		return true;
+	}
+
+	Com_Printf( "%s\n", errorMessage );
+	return false;
+}
+
+void SortFontShaderEntries( FontShaderEntries &shaderEntries, const int shaderCount ) {
+	auto entries = shaderEntries.begin();
+	std::ranges::sort( entries, entries + shaderCount, std::less<>{}, &FontShaderEntry::threshold );
+
+	if ( shaderCount > 0 ) {
+		shaderEntries[0].threshold = 0;
+	}
+}
+
+[[nodiscard]] GlyphLayout LayoutGlyph( const font_metric_t &metric, const float x, const float glyphWidth, const bool proportional ) noexcept {
+	if ( proportional ) {
+		const float adjustedX = x + metric.space1 * glyphWidth;
+		return { metric.tc_prop, metric.width * glyphWidth, adjustedX + metric.space2 * glyphWidth };
+	}
+
+	return { metric.tc_mono, glyphWidth, x + glyphWidth };
+}
+
+[[nodiscard]] qhandle_t FontShaderForHeight( const float glyphHeight ) noexcept {
+	qhandle_t shader = font->shader[0];
+	for ( int shaderIndex = 1; shaderIndex < font->shaderCount; ++shaderIndex ) {
+		if ( glyphHeight >= font->shaderThreshold[shaderIndex] ) {
+			shader = font->shader[shaderIndex];
+		}
+	}
+	return shader;
+}
+
+void ApplyTextColorCode( vec4_t color, const byte colorCode, const float alpha ) {
+	VectorCopy( g_color_table[ColorIndex( colorCode )], color );
+	color[3] = alpha;
+}
+
+} // namespace
 
 
 void CG_SelectFont( int index ) 
@@ -263,47 +392,39 @@ static qboolean CG_FileExist( const char *file )
 
 static void CG_LoadFont( font_t *fnt, const char *fontName )
 {
-	char buf[ 8000 ];
-	fileHandle_t f;
-	char *token, *text;
-	float width, height, r_width, r_height;
-	float char_width;
-	float char_height;
-	char shaderName[ MAX_FONT_SHADERS ][ MAX_QPATH ], tmpName[ MAX_QPATH ];
-	int shaderCount;
-	int shaderThreshold[ MAX_FONT_SHADERS ];
-	font_metric_t *fm;
-	int i, tmp, len, chars;
-	float w1, w2;
-	float s1, s2;
-	float x0, y0;
-	qboolean swapped;
+	std::array<char, kFontFileBufferSize> buffer{};
+	FontShaderEntries shaderEntries{};
+	fileHandle_t fileHandle;
+	char *text = buffer.data();
+	float width = 0.0f;
+	float height = 0.0f;
+	float charWidth = 0.0f;
+	float charHeight = 0.0f;
+	const char *token = nullptr;
+	int shaderCount = 0;
+	int chars = 0;
 
-	memset( fnt, 0, sizeof( *fnt ) );
+	*fnt = font_t{};
 
-	len = trap_FS_FOpenFile( fontName, &f, FS_READ );
-	if ( f == FS_INVALID_HANDLE ) {
+	int len = trap_FS_FOpenFile( fontName, &fileHandle, FS_READ );
+	if ( fileHandle == FS_INVALID_HANDLE ) {
 		CG_Printf( S_COLOR_YELLOW "CG_LoadFont: error opening %s\n", fontName );
 		return;
 	}
 
-	if ( len >= sizeof( buf ) ) {
+	if ( len >= static_cast<int>( buffer.size() ) ) {
 		CG_Printf( S_COLOR_YELLOW "CG_LoadFont: font file is too long: %i\n", len );
-		len = sizeof( buf )-1;
+		len = static_cast<int>( buffer.size() ) - 1;
 	}
 
-	trap_FS_Read( buf, len, f );
-	trap_FS_FCloseFile( f );
-	buf[ len ] = '\0';
+	trap_FS_Read( buffer.data(), len, fileHandle );
+	trap_FS_FCloseFile( fileHandle );
+	buffer[len] = '\0';
 
-	shaderCount = 0;
-
-	text = buf; // initialize parser
 	COM_BeginParseSession( fontName );
 
-	while ( 1 )
-	{
-		token = COM_ParseExt( &text, qtrue );
+	while ( true ) {
+		token = ParseFontToken( &text, qtrue );
 		if ( token[0] == '\0' ) {
 			Com_Printf( S_COLOR_RED "CG_LoadFont: parse error.\n" );
 			return;
@@ -316,16 +437,19 @@ static void CG_LoadFont( font_t *fnt, const char *fontName )
 				SkipRestOfLine( &text );
 				continue;
 			}
-			token = COM_ParseExt( &text, qfalse );
+			if ( !ParseRequiredFontToken( &text, qfalse, "CG_LoadFont: error reading font image.", token ) ) {
+				return;
+			}
 			if ( !CG_FileExist( token ) ) {
 				Com_Printf( "CG_LoadFont: font image '%s' doesn't exist.\n", token );
 				return;
 			}
-			// save shader name
-			Q_strncpyz( shaderName[ shaderCount ], token, sizeof( shaderName[ shaderCount ] ) );
-			// get threshold
-			token = COM_ParseExt( &text, qfalse );
-			shaderThreshold[ shaderCount ] = atoi( token );
+			Q_strncpyz( shaderEntries[shaderCount].name.data(), token, static_cast<int>( shaderEntries[shaderCount].name.size() ) );
+
+			if ( !ParseRequiredFontToken( &text, qfalse, "CG_LoadFont: error reading image threshold.", token ) ) {
+				return;
+			}
+			shaderEntries[shaderCount].threshold = atoi( token );
 
 			//Com_Printf( S_COLOR_CYAN "img: %s, threshold: %i\n", shaderName[ shaderCount ], shaderThreshold[ shaderCount ] );
 			shaderCount++;
@@ -336,33 +460,18 @@ static void CG_LoadFont( font_t *fnt, const char *fontName )
 
 		// font parameters
 		if ( strcmp( token, "fnt" ) == 0 ) {
-			token = COM_ParseExt( &text, qfalse );
-			if ( token[0] == '\0' || (width = atof( token )) <= 0.0 ) {
-				Com_Printf( "CG_LoadFont: error reading image width.\n" );
+			if ( !ParsePositiveFontFloat( &text, qfalse, "CG_LoadFont: error reading image width.", width ) ) {
 				return;
 			}
-			r_width = 1.0 / width;
-
-			token = COM_ParseExt( &text, qfalse );
-			if ( token[0] == '\0' || (height = atof( token )) <= 0.0 ) {
-				Com_Printf( "CG_LoadFont: error reading image height.\n" );
+			if ( !ParsePositiveFontFloat( &text, qfalse, "CG_LoadFont: error reading image height.", height ) ) {
 				return;
 			}
-			r_height = 1.0 / height;
-			
-			token = COM_ParseExt( &text, qfalse );
-			if ( token[0] == '\0' ) {
-				Com_Printf( "CG_LoadFont: error reading char widht.\n" );
+			if ( !ParseRequiredFontFloat( &text, qfalse, "CG_LoadFont: error reading char widht.", charWidth ) ) {
 				return;
 			}
-			char_width = atof( token );
-
-			token = COM_ParseExt( &text, qfalse );
-			if ( token[0] == '\0' ) {
-				Com_Printf( "CG_LoadFont: error reading char height.\n" );
+			if ( !ParseRequiredFontFloat( &text, qfalse, "CG_LoadFont: error reading char height.", charHeight ) ) {
 				return;
 			}
-			char_height = atof( token );
 
 			break; // parse char metrics
 		}
@@ -373,116 +482,91 @@ static void CG_LoadFont( font_t *fnt, const char *fontName )
 		return;
 	}
 
-	fm = fnt->metrics;
+	const float reciprocalWidth = 1.0f / width;
+	const float reciprocalHeight = 1.0f / height;
 
 	chars = 0;
 	for ( ;; ) {
 		// char index
-		token = COM_ParseExt( &text, qtrue );
-		if ( !token[0] )
+		token = ParseFontToken( &text, qtrue );
+		if ( !token[0] ) {
 			break;
+		}
 
+		int charIndex = 0;
 		if ( token[0] == '\'' && token[1] && token[2] == '\'' ) // char code in form 'X'
-			i = token[1] & 255;
+			charIndex = token[1] & 255;
 		else // integer code
-			i = atoi( token );
+			charIndex = atoi( token );
 
-		if ( i < 0 || i > 255 ) {
-			CG_Printf( S_COLOR_RED "CG_LoadFont: bad char index %i.\n", i );
+		if ( charIndex < 0 || charIndex > 255 ) {
+			CG_Printf( S_COLOR_RED "CG_LoadFont: bad char index %i.\n", charIndex );
 			return;
 		}
-		fm = fnt->metrics + i;
+		font_metric_t &metric = fnt->metrics[charIndex];
+		float x0 = 0.0f;
+		float y0 = 0.0f;
+		float widthOffset = 0.0f;
+		float widthSpan = 0.0f;
+		float spaceBefore = 0.0f;
+		float spaceAfter = 0.0f;
 
 		// x0
-		token = COM_ParseExt( &text, qfalse );
-		if ( !token[0] ) {
-			CG_Printf( S_COLOR_RED "CG_LoadFont: error reading x0.\n" );
+		if ( !ParseRequiredFontFloat( &text, qfalse, "CG_LoadFont: error reading x0.", x0 ) ) {
 			return;
 		}
-		x0 = atof( token );
-	
+
 		// y0
-		token = COM_ParseExt( &text, qfalse );
-		if ( !token[0] ) {
-			CG_Printf( S_COLOR_RED "CG_LoadFont: error reading y0.\n" );
+		if ( !ParseRequiredFontFloat( &text, qfalse, "CG_LoadFont: error reading y0.", y0 ) ) {
 			return;
 		}
-		y0 = atof( token );
-		
+
 		// w1-offset
-		token = COM_ParseExt( &text, qfalse );
-		if ( !token[0] ) {
-			CG_Printf( S_COLOR_RED "CG_LoadFont: error reading x-offset.\n" );
+		if ( !ParseRequiredFontFloat( &text, qfalse, "CG_LoadFont: error reading x-offset.", widthOffset ) ) {
 			return;
 		}
-		w1 = atof( token );
 
 		// w2-offset
-		token = COM_ParseExt( &text, qfalse );
-		if ( !token[0] ) {
-			CG_Printf( S_COLOR_RED "CG_LoadFont: error reading x-length.\n" );
+		if ( !ParseRequiredFontFloat( &text, qfalse, "CG_LoadFont: error reading x-length.", widthSpan ) ) {
 			return;
 		}
-		w2 = atof( token );
 
 		// space1
-		token = COM_ParseExt( &text, qfalse );
-		if ( !token[0] ) {
-			CG_Printf( S_COLOR_RED "CG_LoadFont: error reading space1.\n" );
+		if ( !ParseRequiredFontFloat( &text, qfalse, "CG_LoadFont: error reading space1.", spaceBefore ) ) {
 			return;
 		}
-		s1 = atof( token );
 
 		// space2
-		token = COM_ParseExt( &text, qfalse );
-		if ( !token[0] ) {
-			CG_Printf( S_COLOR_RED "CG_LoadFont: error reading space2.\n" );
+		if ( !ParseRequiredFontFloat( &text, qfalse, "CG_LoadFont: error reading space2.", spaceAfter ) ) {
 			return;
 		}
-		s2 = atof( token );
 
-		fm->tc_mono[0] = x0 * r_width;
-		fm->tc_mono[1] = y0 * r_height;
-		fm->tc_mono[2] = ( x0 + char_width ) * r_width;
-		fm->tc_mono[3] = ( y0 + char_height ) * r_height;
+		metric.tc_mono[0] = x0 * reciprocalWidth;
+		metric.tc_mono[1] = y0 * reciprocalHeight;
+		metric.tc_mono[2] = ( x0 + charWidth ) * reciprocalWidth;
+		metric.tc_mono[3] = ( y0 + charHeight ) * reciprocalHeight;
 
 		// proportional y-coords is matching with mono
-		fm->tc_prop[1] = fm->tc_mono[1];
-		fm->tc_prop[3] = fm->tc_mono[3];
+		metric.tc_prop[1] = metric.tc_mono[1];
+		metric.tc_prop[3] = metric.tc_mono[3];
 
-		fm->width = w2 / char_width;
-		fm->space1 = s1 / char_width;
-		fm->space2 = (s2 + w2) / char_width;
-		fm->tc_prop[0] = fm->tc_mono[0] + (w1 * r_width);
-		fm->tc_prop[2] = fm->tc_prop[0] + (w2 * r_width);
+		metric.width = widthSpan / charWidth;
+		metric.space1 = spaceBefore / charWidth;
+		metric.space2 = ( spaceAfter + widthSpan ) / charWidth;
+		metric.tc_prop[0] = metric.tc_mono[0] + ( widthOffset * reciprocalWidth );
+		metric.tc_prop[2] = metric.tc_prop[0] + ( widthSpan * reciprocalWidth );
 
 		chars++;
 
 		SkipRestOfLine( &text );
 	}
 
-	// sort images by threshold
-	do {
-		for ( swapped = qfalse, i = 1 ; i < shaderCount; i++ ) {
-			if ( shaderThreshold[i-1] > shaderThreshold[i] ) {
-				tmp = shaderThreshold[i-1];
-				shaderThreshold[i-1] = shaderThreshold[i];
-				shaderThreshold[i] = tmp;
-				strcpy( tmpName, shaderName[i-1] );
-				strcpy( shaderName[i-1], shaderName[i] );
-				strcpy( shaderName[i], tmpName );
-				swapped = qtrue;
-			}
-		}
-	} while ( swapped );
-
-	// always assume zero threshold for lowest-quality shader
-	shaderThreshold[0] = 0;
+	SortFontShaderEntries( shaderEntries, shaderCount );
 	
 	fnt->shaderCount = shaderCount;
-	for ( i = 0; i < shaderCount; i++ ) {
-		fnt->shader[i] = trap_R_RegisterShaderNoMip( shaderName[i] );
-		fnt->shaderThreshold[i] = shaderThreshold[i];
+	for ( int shaderIndex = 0; shaderIndex < shaderCount; ++shaderIndex ) {
+		fnt->shader[shaderIndex] = trap_R_RegisterShaderNoMip( shaderEntries[shaderIndex].name.data() );
+		fnt->shaderThreshold[shaderIndex] = shaderEntries[shaderIndex].threshold;
 	}
 
 	CG_Printf( "Font '%s' loaded with %i chars and %i images\n", fontName, chars, shaderCount );
@@ -498,186 +582,122 @@ void CG_LoadFonts( void )
 
 static float DrawStringLength( const char *string, float ax, float aw, float max_ax, int proportional )
 {
-	const font_metric_t	*fm;
-	//float			aw1;
-	float			x_end;
-	const byte		*s;
-	float			xx;
-
-	if ( !string )
+	if ( !string ) {
 		return 0.0f;
-
-	s = (const byte*)string;
-
-	xx = ax;
-
-	while ( *s != '\0' ) {
-
-		if ( *s == Q_COLOR_ESCAPE && s[1] != '\0' && s[1] != '^' ) {
-			//if ( !(flags & DS_SHOW_CODE) ) {
-			s += 2;
-			continue;
-			//}
-		}
-
-		//fm = &font->metrics[ *s ];
-		fm = &metrics[ *s ];
-		if ( proportional ) {
-			//aw1 = fm->width * aw;
-			ax += fm->space1 * aw;			// add extra space if required by metrics
-			x_end = ax + fm->space2 * aw;	// final position
-		} else {
-			//aw1 = aw;
-			x_end = ax + aw;
-		}
-
-		if ( x_end > max_ax ) 
-			break;
-
-		ax = x_end;
-		s++;
 	}
 
-	return (ax - xx);
+	const byte *text = reinterpret_cast<const byte *>( string );
+	const float startX = ax;
+	const bool useProportionalLayout = proportional != 0;
+
+	while ( *text != '\0' ) {
+		if ( IsQColorSequence( text ) ) {
+			text += 2;
+			continue;
+		}
+
+		const GlyphLayout glyph = LayoutGlyph( metrics[*text], ax, aw, useProportionalLayout );
+		if ( glyph.endX > max_ax ) {
+			break;
+		}
+
+		ax = glyph.endX;
+		++text;
+	}
+
+	return ax - startX;
 }
 
 
 void CG_DrawString( float x, float y, const char *string, const vec4_t setColor, float charWidth, float charHeight, int maxChars, int flags ) 
 {
-	const font_metric_t *fm;
-	const float		*tc; // texture coordinates for char
-	float			ax, ay, aw, aw1, ah; // absolute positions/dimensions
-	float			scale;
-	float			x_end, xx;
-	vec4_t			color;
-	const byte		*s;
-	float			xx_add, yy_add;
-	float			max_ax;
-	int				i;
-	qhandle_t		sh;
-	int				proportional;
-
-	if ( !string )
+	if ( !string ) {
 		return;
-
-	s = (const byte *)string;
-
-	ax = x * cgs.screenXScale + cgs.screenXBias;
-	ay = y * cgs.screenYScale + cgs.screenYBias;
-
-	aw = charWidth * cgs.screenXScale;
-	ah = charHeight * cgs.screenYScale;
-
-	if ( maxChars <= 0 ) {
-		max_ax = 9999999.0f;
-	} else {
-		max_ax = ax + aw * maxChars;
 	}
 
-	proportional = (flags & DS_PROPORTIONAL);
+	const bool proportional = ( flags & DS_PROPORTIONAL ) != 0;
+	const float baseX = x * cgs.screenXScale + cgs.screenXBias;
+	const float ay = y * cgs.screenYScale + cgs.screenYBias;
+	const float aw = charWidth * cgs.screenXScale;
+	const float ah = charHeight * cgs.screenYScale;
+	const float maxAx = maxChars <= 0 ? 9999999.0f : baseX + aw * maxChars;
+	float ax = baseX;
+	vec4_t color{};
+	const qhandle_t shader = FontShaderForHeight( ah );
+	const byte *text = reinterpret_cast<const byte *>( string );
 
 	if ( flags & ( DS_CENTER | DS_RIGHT ) ) {
 		if ( flags & DS_CENTER ) {
-			ax -= 0.5f * DrawStringLength( string, ax, aw, max_ax, proportional );
+			ax -= 0.5f * DrawStringLength( string, ax, aw, maxAx, proportional );
 		} else {
-			ax -= DrawStringLength( string, ax, aw, max_ax, proportional );
+			ax -= DrawStringLength( string, ax, aw, maxAx, proportional );
 		}
 	}
 
-	sh = font->shader[0]; // low-res shader by default
-
 	if ( flags & DS_SHADOW ) { 
-		xx = ax;
+		const float shadowBaseX = ax;
 
 		// calculate shadow offsets
-		scale = charWidth * 0.075f; // charWidth/15
-		xx_add = scale * cgs.screenXScale;
-		yy_add = scale * cgs.screenYScale;
+		const float shadowScale = charWidth * 0.075f; // charWidth/15
+		const float shadowOffsetX = shadowScale * cgs.screenXScale;
+		const float shadowOffsetY = shadowScale * cgs.screenYScale;
 
 		color[0] = color[1] = color[2] = 0.0f;
 		color[3] = setColor[3] * 0.5f;
 		trap_R_SetColor( color );
 
-		while ( *s != '\0' ) {
-			if ( *s == Q_COLOR_ESCAPE && s[1] != '\0' && s[1] != '^' ) {
-				//if ( !(options & DS_SHOW_CODE) ) {
-				s += 2;
+		while ( *text != '\0' ) {
+			if ( IsQColorSequence( text ) ) {
+				text += 2;
 				continue;
-				//}
-			}
-			//fm = &font->metrics[ *s ];
-			fm = &metrics[ *s ];
-			if ( proportional ) {
-				tc = fm->tc_prop;
-				aw1 = fm->width * aw;
-				ax += fm->space1 * aw;			// add extra space if required by metrics
-				x_end = ax + fm->space2 * aw;	// final position
-			} else {
-				tc = fm->tc_mono;
-				aw1 = aw;
-				x_end = ax + aw;
 			}
 
-			if ( x_end > max_ax || ax >= cgs.glconfig.vidWidth )
+			const GlyphLayout glyph = LayoutGlyph( metrics[*text], ax, aw, proportional );
+			const float glyphX = proportional ? glyph.endX - glyph.drawWidth : ax;
+			if ( glyph.endX > maxAx || glyphX >= cgs.glconfig.vidWidth ) {
 				break;
+			}
 
-			trap_R_DrawStretchPic( ax + xx_add, ay + yy_add, aw1, ah, tc[0], tc[1], tc[2], tc[3], sh );
+			trap_R_DrawStretchPic( glyphX + shadowOffsetX, ay + shadowOffsetY, glyph.drawWidth, ah,
+				glyph.texCoords[0], glyph.texCoords[1], glyph.texCoords[2], glyph.texCoords[3], shader );
 
-			ax = x_end;
-			s++;
+			ax = glyph.endX;
+			++text;
 		}
 
 		// recover altered parameters
-		s = (const byte*)string;
-		ax = xx;
-	}
-
-	// select hi-res shader if accepted
-	for ( i = 1; i < font->shaderCount; i++ ) {
-		if ( ah >= font->shaderThreshold[i] ) {
-			sh = font->shader[i];
-		}
+		text = reinterpret_cast<const byte *>( string );
+		ax = shadowBaseX;
 	}
 	
 	Vector4Copy( setColor, color );
 	trap_R_SetColor( color );
 	
-	while ( *s != '\0' ) {
+	while ( *text != '\0' ) {
 
-		if ( *s == Q_COLOR_ESCAPE && s[1] != '\0' && s[1] != '^' ) {
+		if ( IsQColorSequence( text ) ) {
 			if ( !( flags & DS_FORCE_COLOR ) ) {
-				VectorCopy( g_color_table[ ColorIndex( s[1] ) ], color );
+				ApplyTextColorCode( color, text[1], setColor[3] );
 				trap_R_SetColor( color );
 			}
-			//if ( !(options & DS_SHOW_CODE) ) {
-			s += 2;
+			text += 2;
 			continue;
-			//}
 		}
 
-		//fm = &font->metrics[ *s ];
-		fm = &metrics[ *s ];
-		if ( proportional ) {
-			tc = fm->tc_prop;
-			aw1 = fm->width * aw;
-			ax += fm->space1 * aw;			// add extra space if required by metrics
-			x_end = ax + fm->space2 * aw;	// final position
-		} else {
-			tc = fm->tc_mono;
-			aw1 = aw;
-			x_end = ax + aw;
-		}
-
-		if ( x_end > max_ax || ax >= cgs.glconfig.vidWidth )
+		const GlyphLayout glyph = LayoutGlyph( metrics[*text], ax, aw, proportional );
+		const float glyphX = proportional ? glyph.endX - glyph.drawWidth : ax;
+		if ( glyph.endX > maxAx || glyphX >= cgs.glconfig.vidWidth ) {
 			break;
+		}
 
-		trap_R_DrawStretchPic( ax, ay, aw1, ah, tc[0], tc[1], tc[2], tc[3], sh );
+		trap_R_DrawStretchPic( glyphX, ay, glyph.drawWidth, ah,
+			glyph.texCoords[0], glyph.texCoords[1], glyph.texCoords[2], glyph.texCoords[3], shader );
 
-		ax = x_end;
-		s++;
+		ax = glyph.endX;
+		++text;
 	}
 
-	//trap_R_SetColor( NULL );
+	ResetRenderColor();
 }
 #else
 
@@ -807,28 +827,8 @@ CG_FadeColor
 ================
 */
 float *CG_FadeColor( int startMsec, int totalMsec ) {
-	static vec4_t		color;
-	int			t;
-
-	if ( startMsec == 0 ) {
-		return NULL;
-	}
-
-	t = cg.time - startMsec;
-
-	if ( t >= totalMsec ) {
-		return NULL;
-	}
-
-	// fade out
-	if ( totalMsec - t < FADE_TIME ) {
-		color[3] = ( totalMsec - t ) * 1.0/FADE_TIME;
-	} else {
-		color[3] = 1.0;
-	}
-	color[0] = color[1] = color[2] = 1;
-
-	return color;
+	static vec4_t color{};
+	return EvaluateFadeColor( startMsec, totalMsec, FADE_TIME, color );
 }
 
 
@@ -838,28 +838,8 @@ CG_FadeColorTime
 ================
 */
 float *CG_FadeColorTime( int startMsec, int totalMsec, int fadeMsec ) {
-	static vec4_t		color;
-	int			t;
-
-	if ( startMsec == 0 ) {
-		return NULL;
-	}
-
-	t = cg.time - startMsec;
-
-	if ( t >= totalMsec ) {
-		return NULL;
-	}
-
-	// fade out
-	if ( totalMsec - t < fadeMsec ) {
-		color[3] = ( totalMsec - t ) * 1.0f/(float)fadeMsec;
-	} else {
-		color[3] = 1.0f;
-	}
-	color[0] = color[1] = color[2] = 1.0f;
-
-	return color;
+	static vec4_t color{};
+	return EvaluateFadeColor( startMsec, totalMsec, fadeMsec, color );
 }
 
 
@@ -869,10 +849,10 @@ CG_TeamColor
 ================
 */
 const float *CG_TeamColor( team_t team ) {
-	static vec4_t	red = {1, 0.2f, 0.2f, 1};
-	static vec4_t	blue = {0.2f, 0.2f, 1, 1};
-	static vec4_t	other = {1, 1, 1, 1};
-	static vec4_t	spectator = {0.7f, 0.7f, 0.7f, 1};
+	static const vec4_t red = {1, 0.2f, 0.2f, 1};
+	static const vec4_t blue = {0.2f, 0.2f, 1, 1};
+	static const vec4_t other = {1, 1, 1, 1};
+	static const vec4_t spectator = {0.7f, 0.7f, 0.7f, 1};
 
 	switch ( team ) {
 	case TEAM_RED:
@@ -894,41 +874,22 @@ CG_GetColorForHealth
 =================
 */
 void CG_GetColorForHealth( int health, int armor, vec4_t hcolor ) {
-	int		count;
-	int		max;
-
 	// calculate the total points of damage that can
 	// be sustained at the current health / armor level
 	if ( health <= 0 ) {
 		VectorClear( hcolor );	// black
-		hcolor[3] = 1;
+		hcolor[3] = 1.0f;
 		return;
 	}
-	count = armor;
-	max = health * ARMOR_PROTECTION / ( 1.0 - ARMOR_PROTECTION );
-	if ( max < count ) {
-		count = max;
-	}
-	health += count;
+
+	const int absorbableArmor = static_cast<int>( health * ARMOR_PROTECTION / ( 1.0f - ARMOR_PROTECTION ) );
+	const int effectiveHealth = health + std::min( armor, absorbableArmor );
 
 	// set the color based on health
 	hcolor[0] = 1.0;
 	hcolor[3] = 1.0;
-	if ( health >= 100 ) {
-		hcolor[2] = 1.0;
-	} else if ( health < 66 ) {
-		hcolor[2] = 0;
-	} else {
-		hcolor[2] = ( health - 66 ) / 33.0;
-	}
-
-	if ( health > 60 ) {
-		hcolor[1] = 1.0;
-	} else if ( health < 30 ) {
-		hcolor[1] = 0;
-	} else {
-		hcolor[1] = ( health - 30 ) / 30.0;
-	}
+	hcolor[2] = NormalizedHealthChannel( effectiveHealth, 66, 100 );
+	hcolor[1] = NormalizedHealthChannel( effectiveHealth, 30, 60 );
 }
 
 
@@ -1100,6 +1061,61 @@ static int propMapB[26][3] = {
 #define PROPB_SPACE_WIDTH	12
 #define PROPB_HEIGHT		36
 
+namespace {
+
+[[nodiscard]] int BannerGlyphWidth( const unsigned char ch ) noexcept {
+	if ( ch == ' ' ) {
+		return PROPB_SPACE_WIDTH;
+	}
+	if ( ch >= 'A' && ch <= 'Z' ) {
+		return propMapB[ch - 'A'][2];
+	}
+	return 0;
+}
+
+[[nodiscard]] int BannerStringWidth( const char *text ) noexcept {
+	int width = 0;
+	for ( const unsigned char *cursor = reinterpret_cast<const unsigned char *>( text ); *cursor; ++cursor ) {
+		const int glyphWidth = BannerGlyphWidth( *cursor );
+		if ( glyphWidth > 0 ) {
+			width += glyphWidth + PROPB_GAP_WIDTH;
+		}
+	}
+	return width > 0 ? width - PROPB_GAP_WIDTH : 0;
+}
+
+[[nodiscard]] int ProportionalGlyphWidth( const unsigned char ch ) noexcept {
+	const int glyphWidth = propMap[ch][2];
+	return glyphWidth != -1 ? glyphWidth : 0;
+}
+
+[[nodiscard]] int ProportionalStringWidthInternal( const char *text ) noexcept {
+	int width = 0;
+	for ( const unsigned char *cursor = reinterpret_cast<const unsigned char *>( text ); *cursor; ++cursor ) {
+		const int glyphWidth = ProportionalGlyphWidth( *cursor );
+		if ( glyphWidth > 0 ) {
+			width += glyphWidth + PROP_GAP_WIDTH;
+		}
+	}
+	return width > 0 ? width - PROP_GAP_WIDTH : 0;
+}
+
+void SetShadowColor( vec4_t drawColor, const vec4_t color ) noexcept {
+	drawColor[0] = 0.0f;
+	drawColor[1] = 0.0f;
+	drawColor[2] = 0.0f;
+	drawColor[3] = color[3];
+}
+
+void SetScaledColor( vec4_t drawColor, const vec4_t color, const float scale ) noexcept {
+	drawColor[0] = color[0] * scale;
+	drawColor[1] = color[1] * scale;
+	drawColor[2] = color[2] * scale;
+	drawColor[3] = color[3];
+}
+
+} // namespace
+
 /*
 =================
 UI_DrawBannerString
@@ -1145,29 +1161,14 @@ static void UI_DrawBannerString2( int x, int y, const char* str, vec4_t color )
 		s++;
 	}
 
-	trap_R_SetColor( NULL );
+	ResetRenderColor();
 }
 
 void UI_DrawBannerString( int x, int y, const char* str, int style, vec4_t color ) {
-	const char *	s;
-	int				ch;
-	int				width;
 	vec4_t			drawcolor;
 
 	// find the width of the drawn text
-	s = str;
-	width = 0;
-	while ( *s ) {
-		ch = *s;
-		if ( ch == ' ' ) {
-			width += PROPB_SPACE_WIDTH;
-		}
-		else if ( ch >= 'A' && ch <= 'Z' ) {
-			width += propMapB[ch - 'A'][2] + PROPB_GAP_WIDTH;
-		}
-		s++;
-	}
-	width -= PROPB_GAP_WIDTH;
+	const int width = BannerStringWidth( str );
 
 	switch( style & UI_FORMATMASK ) {
 		case UI_CENTER:
@@ -1184,8 +1185,7 @@ void UI_DrawBannerString( int x, int y, const char* str, int style, vec4_t color
 	}
 
 	if ( style & UI_DROPSHADOW ) {
-		drawcolor[0] = drawcolor[1] = drawcolor[2] = 0;
-		drawcolor[3] = color[3];
+		SetShadowColor( drawcolor, color );
 		UI_DrawBannerString2( x+2, y+2, str, drawcolor );
 	}
 
@@ -1194,25 +1194,7 @@ void UI_DrawBannerString( int x, int y, const char* str, int style, vec4_t color
 
 
 int UI_ProportionalStringWidth( const char* str ) {
-	const char *	s;
-	int				ch;
-	int				charWidth;
-	int				width;
-
-	s = str;
-	width = 0;
-	while ( *s ) {
-		ch = *s & 127;
-		charWidth = propMap[ch][2];
-		if ( charWidth != -1 ) {
-			width += charWidth;
-			width += PROP_GAP_WIDTH;
-		}
-		s++;
-	}
-
-	width -= PROP_GAP_WIDTH;
-	return width;
+	return ProportionalStringWidthInternal( str );
 }
 
 static void UI_DrawProportionalString2( int x, int y, const char* str, vec4_t color, float sizeScale, qhandle_t charset )
@@ -1256,7 +1238,7 @@ static void UI_DrawProportionalString2( int x, int y, const char* str, vec4_t co
 		s++;
 	}
 
-	trap_R_SetColor( NULL );
+	ResetRenderColor();
 }
 
 /*
@@ -1287,12 +1269,12 @@ void UI_DrawProportionalString( int x, int y, const char* str, int style, vec4_t
 
 	switch( style & UI_FORMATMASK ) {
 		case UI_CENTER:
-			width = UI_ProportionalStringWidth( str ) * sizeScale;
+			width = static_cast<int>( ProportionalStringWidthInternal( str ) * sizeScale );
 			x -= width / 2;
 			break;
 
 		case UI_RIGHT:
-			width = UI_ProportionalStringWidth( str ) * sizeScale;
+			width = static_cast<int>( ProportionalStringWidthInternal( str ) * sizeScale );
 			x -= width;
 			break;
 
@@ -1302,30 +1284,21 @@ void UI_DrawProportionalString( int x, int y, const char* str, int style, vec4_t
 	}
 
 	if ( style & UI_DROPSHADOW ) {
-		drawcolor[0] = drawcolor[1] = drawcolor[2] = 0;
-		drawcolor[3] = color[3];
+		SetShadowColor( drawcolor, color );
 		UI_DrawProportionalString2( x+2, y+2, str, drawcolor, sizeScale, cgs.media.charsetProp );
 	}
 
 	if ( style & UI_INVERSE ) {
-		drawcolor[0] = color[0] * 0.8;
-		drawcolor[1] = color[1] * 0.8;
-		drawcolor[2] = color[2] * 0.8;
-		drawcolor[3] = color[3];
+		SetScaledColor( drawcolor, color, 0.8f );
 		UI_DrawProportionalString2( x, y, str, drawcolor, sizeScale, cgs.media.charsetProp );
 		return;
 	}
 
 	if ( style & UI_PULSE ) {
-		drawcolor[0] = color[0] * 0.8;
-		drawcolor[1] = color[1] * 0.8;
-		drawcolor[2] = color[2] * 0.8;
-		drawcolor[3] = color[3];
+		SetScaledColor( drawcolor, color, 0.8f );
 		UI_DrawProportionalString2( x, y, str, color, sizeScale, cgs.media.charsetProp );
 
-		drawcolor[0] = color[0];
-		drawcolor[1] = color[1];
-		drawcolor[2] = color[2];
+		Vector4Copy( color, drawcolor );
 		drawcolor[3] = 0.5 + 0.5 * sin( ( cg.time % TMOD_075 ) / PULSE_DIVISOR );
 		UI_DrawProportionalString2( x, y, str, drawcolor, sizeScale, cgs.media.charsetPropGlow );
 		return;

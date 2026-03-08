@@ -5,34 +5,44 @@
 
 	User interface building blocks and support functions.
 **********************************************************************/
+#include <array>
+
 #include "ui_local.h"
 
 uiStatic_t		uis;
 qboolean		m_entersound;		// after a frame, so caching won't disrupt the sound
+
+namespace {
+
+void ResetRenderColor() {
+	trap_R_SetColor( nullptr );
+}
+
+} // namespace
 
 // these are here so the functions in q_shared.c can link
 #ifndef UI_HARD_LINKED
 
 void QDECL Com_Error( int level, const char *fmt, ... ) {
 	va_list		argptr;
-	char		text[2048];
+	std::array<char, 2048> text{};
 
 	va_start( argptr, fmt );
-	Q_vsprintf( text, fmt, argptr );
+	Q_vsprintf( text.data(), fmt, argptr );
 	va_end (argptr);
 
-	trap_Error( text );
+	trap_Error( text.data() );
 }
 
 void QDECL Com_Printf( const char *fmt, ... ) {
 	va_list		argptr;
-	char		text[2048];
+	std::array<char, 2048> text{};
 
 	va_start( argptr, fmt );
-	Q_vsprintf( text, fmt, argptr );
+	Q_vsprintf( text.data(), fmt, argptr );
 	va_end (argptr);
 
-	trap_Print( text );
+	trap_Print( text.data() );
 }
 
 #endif
@@ -137,7 +147,7 @@ void UI_PopMenu (void)
 void UI_ForceMenuOff (void)
 {
 	uis.menusp     = 0;
-	uis.activemenu = NULL;
+	uis.activemenu = nullptr;
 
 	trap_Key_SetCatcher( trap_Key_GetCatcher() & ~KEYCATCH_UI );
 	trap_Key_ClearStates();
@@ -362,7 +372,7 @@ static void UI_DrawBannerString2( int x, int y, const char* str, vec4_t color )
 		s++;
 	}
 
-	trap_R_SetColor( NULL );
+	ResetRenderColor();
 }
 
 void UI_DrawBannerString( int x, int y, const char* str, int style, vec4_t color ) {
@@ -472,7 +482,7 @@ static void UI_DrawProportionalString2( int x, int y, const char* str, vec4_t co
 		s++;
 	}
 
-	trap_R_SetColor( NULL );
+	ResetRenderColor();
 }
 
 /*
@@ -559,7 +569,7 @@ void UI_DrawProportionalString_AutoWrapped( int x, int y, int xmax, int ystep, c
 	int width;
 	char *s1,*s2,*s3;
 	char c_bcp;
-	char buf[1024];
+	std::array<char, 1024> buf{};
 	float   sizeScale;
 
 	if (!str || str[0]=='\0')
@@ -567,8 +577,8 @@ void UI_DrawProportionalString_AutoWrapped( int x, int y, int xmax, int ystep, c
 	
 	sizeScale = UI_ProportionalSizeScale( style );
 	
-	Q_strncpyz(buf, str, sizeof(buf));
-	s1 = s2 = s3 = buf;
+	Q_strncpyz( buf.data(), str, buf.size() );
+	s1 = s2 = s3 = buf.data();
 
 	while (1) {
 		do {
@@ -671,7 +681,7 @@ static void UI_DrawString2( int x, int y, const char* str, vec4_t color, int cha
 		s++;
 	}
 
-	trap_R_SetColor( NULL );
+	ResetRenderColor();
 }
 
 
@@ -762,12 +772,12 @@ UI_DrawChar
 */
 void UI_DrawChar( int x, int y, int ch, int style, vec4_t color )
 {
-	char	buff[2];
+	std::array<char, 2> buff{};
 
 	buff[0] = ch;
 	buff[1] = '\0';
 
-	UI_DrawString( x, y, buff, style, color );
+	UI_DrawString( x, y, buff.data(), style, color );
 }
 
 
@@ -806,10 +816,10 @@ void UI_SetActiveMenu( uiMenuCommand_t menu ) {
 		UI_MainMenu();
 		return;
 	case UIMENU_NEED_CD:
-		UI_ConfirmMenu( "Insert the CD", (voidfunc_f)NULL, NeedCDAction );
+		UI_ConfirmMenu( "Insert the CD", nullptr, NeedCDAction );
 		return;
 	case UIMENU_BAD_CD_KEY:
-		UI_ConfirmMenu( "Bad CD Key", (voidfunc_f)NULL, NeedCDKeyAction );
+		UI_ConfirmMenu( "Bad CD Key", nullptr, NeedCDKeyAction );
 		return;
 	case UIMENU_INGAME:
 		/*
@@ -928,20 +938,20 @@ void UI_MouseEvent( int dx, int dy )
 
 
 char *UI_Argv( int arg ) {
-	static char	buffer[MAX_STRING_CHARS];
+	static std::array<char, MAX_STRING_CHARS> buffer{};
 
-	trap_Argv( arg, buffer, sizeof( buffer ) );
+	trap_Argv( arg, buffer.data(), buffer.size() );
 
-	return buffer;
+	return buffer.data();
 }
 
 
 char *UI_Cvar_VariableString( const char *var_name ) {
-	static char	buffer[MAX_STRING_CHARS];
+	static std::array<char, MAX_STRING_CHARS> buffer{};
 
-	trap_Cvar_VariableStringBuffer( var_name, buffer, sizeof( buffer ) );
+	trap_Cvar_VariableStringBuffer( var_name, buffer.data(), buffer.size() );
 
-	return buffer;
+	return buffer.data();
 }
 
 
@@ -1070,7 +1080,7 @@ void UI_Init( void ) {
 	// initialize the menu system
 	Menu_Cache();
 
-	uis.activemenu = NULL;
+	uis.activemenu = nullptr;
 	uis.menusp     = 0;
 }
 
@@ -1151,7 +1161,7 @@ void UI_FillRect( float x, float y, float width, float height, const float *colo
 	UI_AdjustFrom640( &x, &y, &width, &height );
 	trap_R_DrawStretchPic( x, y, width, height, 0, 0, 0, 0, uis.whiteShader );
 
-	trap_R_SetColor( NULL );
+	ResetRenderColor();
 }
 
 /*
@@ -1171,7 +1181,7 @@ void UI_DrawRect( float x, float y, float width, float height, const float *colo
 	trap_R_DrawStretchPic( x, y + height - 1, width, 1, 0, 0, 0, 0, uis.whiteShader );
 	trap_R_DrawStretchPic( x + width - 1, y, 1, height, 0, 0, 0, 0, uis.whiteShader );
 
-	trap_R_SetColor( NULL );
+	ResetRenderColor();
 }
 
 void UI_SetColor( const float *rgba ) {
@@ -1223,7 +1233,7 @@ void UI_Refresh( int realtime )
 	}
 
 	// draw cursor
-	UI_SetColor( NULL );
+	UI_SetColor( nullptr );
 	UI_DrawCursor( uis.cursorx-16, uis.cursory-16, 32, 32 );
 
 #ifndef NDEBUG

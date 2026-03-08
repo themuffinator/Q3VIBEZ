@@ -6,10 +6,64 @@
 
 #include "g_local.h"
 
+#include <array>
+#include <cstring>
+
 
 gentity_t	*podium1;
 gentity_t	*podium2;
 gentity_t	*podium3;
+
+namespace {
+
+using TournamentMessageBuffer = std::array<char, MAX_STRING_CHARS>;
+using TournamentSegmentBuffer = std::array<char, 32>;
+
+int FindHumanTournamentPlayerClientNum() {
+	for( int clientNum = 0; clientNum < level.maxclients; ++clientNum ) {
+		gentity_t &player = g_entities[clientNum];
+		if( !player.inuse ) {
+			continue;
+		}
+		if( !( player.r.svFlags & SVF_BOT ) ) {
+			return clientNum;
+		}
+	}
+
+	return -1;
+}
+
+int AccuracyPercent( const gclient_t &client ) {
+	if( client.accuracy_shots == 0 ) {
+		return 0;
+	}
+
+	return client.accuracy_hits * 100 / client.accuracy_shots;
+}
+
+qboolean AppendTournamentClientSummary( TournamentMessageBuffer &message, int &messageLength, const int clientNum ) {
+	TournamentSegmentBuffer segment{};
+
+	Com_sprintf(
+		segment.data(),
+		static_cast<int>( segment.size() ),
+		" %i %i %i",
+		clientNum,
+		level.clients[clientNum].ps.persistant[PERS_RANK],
+		level.clients[clientNum].ps.persistant[PERS_SCORE]
+	);
+
+	const int segmentLength = static_cast<int>( std::strlen( segment.data() ) );
+	if( messageLength + segmentLength >= static_cast<int>( message.size() ) - 1 ) {
+		return qfalse;
+	}
+
+	std::strcat( message.data(), segment.data() );
+	messageLength += segmentLength;
+	return qtrue;
+}
+
+}
 
 
 /*
@@ -19,49 +73,32 @@ UpdateTournamentInfo
 */
 void UpdateTournamentInfo( void ) {
 	int			i;
-	gentity_t	*player;
 	int			playerClientNum;
-	int			n, accuracy, perfect,	msglen;
+	int			n, accuracy, perfect, msglen;
 #ifdef MISSIONPACK
-  int score1, score2;
+	int score1, score2;
 	qboolean won;
 #endif
-	char		buf[32];
-	char		msg[MAX_STRING_CHARS];
+	TournamentMessageBuffer msg{};
 
-	// find the real player
-	player = NULL;
-	for (i = 0; i < level.maxclients; i++ ) {
-		player = &g_entities[i];
-		if ( !player->inuse ) {
-			continue;
-		}
-		if ( !( player->r.svFlags & SVF_BOT ) ) {
-			break;
-		}
-	}
-	// this should never happen!
-	if ( !player || i == level.maxclients ) {
+	playerClientNum = FindHumanTournamentPlayerClientNum();
+	if( playerClientNum < 0 ) {
 		return;
 	}
-	playerClientNum = i;
+
+	gentity_t *const player = &g_entities[playerClientNum];
 
 	CalculateRanks();
 
 	if ( level.clients[playerClientNum].sess.sessionTeam == TEAM_SPECTATOR ) {
 #ifdef MISSIONPACK
-		Com_sprintf( msg, sizeof(msg), "postgame %i %i 0 0 0 0 0 0 0 0 0 0 0", level.numNonSpectatorClients, playerClientNum );
+		Com_sprintf( msg.data(), static_cast<int>( msg.size() ), "postgame %i %i 0 0 0 0 0 0 0 0 0 0 0", level.numNonSpectatorClients, playerClientNum );
 #else
-		Com_sprintf( msg, sizeof(msg), "postgame %i %i 0 0 0 0 0 0", level.numNonSpectatorClients, playerClientNum );
+		Com_sprintf( msg.data(), static_cast<int>( msg.size() ), "postgame %i %i 0 0 0 0 0 0", level.numNonSpectatorClients, playerClientNum );
 #endif
 	}
 	else {
-		if( player->client->accuracy_shots ) {
-			accuracy = player->client->accuracy_hits * 100 / player->client->accuracy_shots;
-		}
-		else {
-			accuracy = 0;
-		}
+		accuracy = AccuracyPercent( *player->client );
 #ifdef MISSIONPACK
 		won = qfalse;
 		if (g_gametype.integer >= GT_CTF) {
@@ -87,31 +124,28 @@ void UpdateTournamentInfo( void ) {
 		} else {
 			perfect = 0;
 		}
-		Com_sprintf( msg, sizeof(msg), "postgame %i %i %i %i %i %i %i %i %i %i %i %i %i %i", level.numNonSpectatorClients, playerClientNum, accuracy,
+		Com_sprintf( msg.data(), static_cast<int>( msg.size() ), "postgame %i %i %i %i %i %i %i %i %i %i %i %i %i %i", level.numNonSpectatorClients, playerClientNum, accuracy,
 			player->client->ps.persistant[PERS_IMPRESSIVE_COUNT], player->client->ps.persistant[PERS_EXCELLENT_COUNT],player->client->ps.persistant[PERS_DEFEND_COUNT],
 			player->client->ps.persistant[PERS_ASSIST_COUNT], player->client->ps.persistant[PERS_GAUNTLET_FRAG_COUNT], player->client->ps.persistant[PERS_SCORE],
 			perfect, score1, score2, level.time, player->client->ps.persistant[PERS_CAPTURES] );
 
 #else
 		perfect = ( level.clients[playerClientNum].ps.persistant[PERS_RANK] == 0 && player->client->ps.persistant[PERS_KILLED] == 0 ) ? 1 : 0;
-		Com_sprintf( msg, sizeof(msg), "postgame %i %i %i %i %i %i %i %i", level.numNonSpectatorClients, playerClientNum, accuracy,
+		Com_sprintf( msg.data(), static_cast<int>( msg.size() ), "postgame %i %i %i %i %i %i %i %i", level.numNonSpectatorClients, playerClientNum, accuracy,
 			player->client->ps.persistant[PERS_IMPRESSIVE_COUNT], player->client->ps.persistant[PERS_EXCELLENT_COUNT],
 			player->client->ps.persistant[PERS_GAUNTLET_FRAG_COUNT], player->client->ps.persistant[PERS_SCORE],
 			perfect );
 #endif
 	}
 
-	msglen = (int)strlen( msg );
+	msglen = static_cast<int>( std::strlen( msg.data() ) );
 	for( i = 0; i < level.numNonSpectatorClients; i++ ) {
 		n = level.sortedClients[i];
-		Com_sprintf( buf, sizeof(buf), " %i %i %i", n, level.clients[n].ps.persistant[PERS_RANK], level.clients[n].ps.persistant[PERS_SCORE] );
-		msglen += (int)strlen( buf );
-		if( msglen >= sizeof(msg)-1 ) {
+		if( !AppendTournamentClientSummary( msg, msglen, n ) ) {
 			break;
 		}
-		strcat( msg, buf );
 	}
-	trap_SendConsoleCommand( EXEC_APPEND, msg );
+	trap_SendConsoleCommand( EXEC_APPEND, msg.data() );
 }
 
 

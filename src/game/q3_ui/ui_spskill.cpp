@@ -10,6 +10,8 @@ SINGLE PLAYER SKILL MENU
 
 #include "ui_local.h"
 
+#include <array>
+
 
 #define ART_FRAME					"menu/art/cut_frame"
 #define ART_BACK					"menu/art/back_0.tga"
@@ -48,33 +50,46 @@ typedef struct {
 	menubitmap_s	item_fight;
 
 	const char		*arenaInfo;
-	qhandle_t		skillpics[5];
+	std::array<qhandle_t, 5>	skillpics;
 	sfxHandle_t		nightmareSound;
 	sfxHandle_t		silenceSound;
 } skillMenuInfo_t;
 
 static skillMenuInfo_t	skillMenuInfo;
 
+namespace {
+
+constexpr std::array<const char *, 5> SkillPicShaders = {
+	ART_MAP_COMPLETE1,
+	ART_MAP_COMPLETE2,
+	ART_MAP_COMPLETE3,
+	ART_MAP_COMPLETE4,
+	ART_MAP_COMPLETE5
+};
+
+menutext_s *SkillItemForIndex( const int skill ) {
+	static const std::array<menutext_s *, 5> SkillItems = {
+		&skillMenuInfo.item_baby,
+		&skillMenuInfo.item_easy,
+		&skillMenuInfo.item_medium,
+		&skillMenuInfo.item_hard,
+		&skillMenuInfo.item_nightmare
+	};
+
+	const int index = skill - 1;
+	if( index < 0 || index >= static_cast<int>( SkillItems.size() ) ) {
+		return nullptr;
+	}
+
+	return SkillItems[index];
+}
+
+}
+
 
 static void SetSkillColor( int skill, vec4_t color ) {
-	switch( skill ) {
-	case 1:
-		skillMenuInfo.item_baby.color = color;
-		break;
-	case 2:
-		skillMenuInfo.item_easy.color = color;
-		break;
-	case 3:
-		skillMenuInfo.item_medium.color = color;
-		break;
-	case 4:
-		skillMenuInfo.item_hard.color = color;
-		break;
-	case 5:
-		skillMenuInfo.item_nightmare.color = color;
-		break;
-	default:
-		break;
+	if( menutext_s *const item = SkillItemForIndex( skill ) ) {
+		item->color = color;
 	}
 }
 
@@ -161,11 +176,9 @@ void UI_SPSkillMenu_Cache( void ) {
 	trap_R_RegisterShaderNoMip( ART_BACK_FOCUS );
 	trap_R_RegisterShaderNoMip( ART_FIGHT );
 	trap_R_RegisterShaderNoMip( ART_FIGHT_FOCUS );
-	skillMenuInfo.skillpics[0] = trap_R_RegisterShaderNoMip( ART_MAP_COMPLETE1 );
-	skillMenuInfo.skillpics[1] = trap_R_RegisterShaderNoMip( ART_MAP_COMPLETE2 );
-	skillMenuInfo.skillpics[2] = trap_R_RegisterShaderNoMip( ART_MAP_COMPLETE3 );
-	skillMenuInfo.skillpics[3] = trap_R_RegisterShaderNoMip( ART_MAP_COMPLETE4 );
-	skillMenuInfo.skillpics[4] = trap_R_RegisterShaderNoMip( ART_MAP_COMPLETE5 );
+	for( std::size_t index = 0; index < SkillPicShaders.size(); ++index ) {
+		skillMenuInfo.skillpics[index] = trap_R_RegisterShaderNoMip( SkillPicShaders[index] );
+	}
 
 	skillMenuInfo.nightmareSound = trap_S_RegisterSound( "sound/misc/nightmare.wav", qfalse );
 	skillMenuInfo.silenceSound = trap_S_RegisterSound( "sound/misc/silence.wav", qfalse );
@@ -180,7 +193,7 @@ UI_SPSkillMenu_Init
 static void UI_SPSkillMenu_Init( void ) {
 	int		skill;
 
-	memset( &skillMenuInfo, 0, sizeof(skillMenuInfo) );
+	skillMenuInfo = {};
 	skillMenuInfo.menu.fullscreen = qtrue;
 	skillMenuInfo.menu.key = UI_SPSkillMenu_Key;
 

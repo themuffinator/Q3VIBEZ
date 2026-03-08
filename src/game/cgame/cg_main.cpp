@@ -3,6 +3,10 @@
 // cg_main.c -- initialization and primary entry point for cgame
 #include "cg_local.h"
 
+#include <algorithm>
+#include <array>
+#include <span>
+
 #ifdef MISSIONPACK
 #include "../ui/ui_shared.h"
 // display context for new ui stuff
@@ -14,6 +18,55 @@ int enemyModelModificationCount  = -1;
 int	enemyColorsModificationCount = -1;
 int teamModelModificationCount  = -1;
 int	teamColorsModificationCount = -1;
+
+#ifdef MISSIONPACK
+namespace {
+
+[[nodiscard]] auto ScoreEntries() noexcept -> std::span<score_t> {
+	return { cg.scores.data(), static_cast<std::size_t>( cg.numScores ) };
+}
+
+[[nodiscard]] int CountScoresForTeam( const team_t team ) {
+	const auto scores = ScoreEntries();
+	return static_cast<int>( std::count_if( scores.begin(), scores.end(), [team]( const score_t &score ) {
+		return score.team == team;
+	} ) );
+}
+
+[[nodiscard]] int FindScoreIndexForClient( const int clientNum ) {
+	const auto scores = ScoreEntries();
+	const auto scoreIt = std::find_if( scores.begin(), scores.end(), [clientNum]( const score_t &score ) {
+		return score.client == clientNum;
+	} );
+
+	if ( scoreIt == scores.end() ) {
+		return -1;
+	}
+
+	return static_cast<int>( std::distance( scores.begin(), scoreIt ) );
+}
+
+[[nodiscard]] int FindScoreIndexInTeamList( const int index, const team_t team ) {
+	const auto scores = ScoreEntries();
+	int teamScoreCount = 0;
+
+	for ( int scoreIndex = 0; scoreIndex < static_cast<int>( scores.size() ); ++scoreIndex ) {
+		if ( scores[scoreIndex].team != team ) {
+			continue;
+		}
+
+		if ( teamScoreCount == index ) {
+			return scoreIndex;
+		}
+
+		++teamScoreCount;
+	}
+
+	return -1;
+}
+
+} // namespace
+#endif
 
 void CG_Init( int serverMessageNum, int serverCommandSequence, int clientNum );
 void CG_Shutdown( void );
@@ -104,6 +157,14 @@ static const cvarTable_t cvarTable[] = {
 
 };
 
+namespace {
+
+[[nodiscard]] auto CvarEntries() noexcept -> std::span<const cvarTable_t> {
+	return cvarTable;
+}
+
+} // namespace
+
 
 /*
 =================
@@ -111,18 +172,16 @@ CG_RegisterCvars
 =================
 */
 void CG_RegisterCvars( void ) {
-	int			i;
-	const cvarTable_t	*cv;
-	char		var[MAX_TOKEN_CHARS];
+	std::array<char, MAX_TOKEN_CHARS> svRunning{};
 
-	for ( i = 0, cv = cvarTable ; i < ARRAY_LEN( cvarTable ) ; i++, cv++ ) {
-		trap_Cvar_Register( cv->vmCvar, cv->cvarName,
-			cv->defaultString, cv->cvarFlags );
+	for ( const cvarTable_t &cv : CvarEntries() ) {
+		trap_Cvar_Register( cv.vmCvar, cv.cvarName,
+			cv.defaultString, cv.cvarFlags );
 	}
 
 	// see if we are also running the server on this machine
-	trap_Cvar_VariableStringBuffer( "sv_running", var, sizeof( var ) );
-	cgs.localServer = atoi( var );
+	trap_Cvar_VariableStringBuffer( "sv_running", svRunning.data(), svRunning.size() );
+	cgs.localServer = atoi( svRunning.data() );
 
 	forceModelModificationCount = cg_forceModel.modificationCount;
 	enemyModelModificationCount = cg_enemyModel.modificationCount;
@@ -131,8 +190,8 @@ void CG_RegisterCvars( void ) {
 	teamColorsModificationCount = cg_teamColors.modificationCount;
 
 
-	trap_Cvar_Register(NULL, "model", DEFAULT_MODEL, CVAR_USERINFO | CVAR_ARCHIVE );
-	trap_Cvar_Register(NULL, "headmodel", DEFAULT_MODEL, CVAR_USERINFO | CVAR_ARCHIVE );
+	trap_Cvar_Register( nullptr, "model", DEFAULT_MODEL, CVAR_USERINFO | CVAR_ARCHIVE );
+	trap_Cvar_Register( nullptr, "headmodel", DEFAULT_MODEL, CVAR_USERINFO | CVAR_ARCHIVE );
 	//trap_Cvar_Register(NULL, "team_model", DEFAULT_TEAM_MODEL, CVAR_USERINFO | CVAR_ARCHIVE );
 	//trap_Cvar_Register(NULL, "team_headmodel", DEFAULT_TEAM_HEAD, CVAR_USERINFO | CVAR_ARCHIVE );
 }
@@ -144,15 +203,12 @@ CG_ForceModelChange
 ===================
 */
 void CG_ForceModelChange( void ) {
-	const char *clientInfo;
-	int	i;
-
-	for ( i = 0 ; i < MAX_CLIENTS ; i++ ) {
-		clientInfo = CG_ConfigString( CS_PLAYERS + i );
+	for ( int clientNum = 0 ; clientNum < MAX_CLIENTS ; ++clientNum ) {
+		const char *clientInfo = CG_ConfigString( CS_PLAYERS + clientNum );
 		if ( !clientInfo[0] ) {
 			continue;
 		}
-		CG_NewClientInfo( i );
+		CG_NewClientInfo( clientNum );
 	}
 }
 
@@ -163,11 +219,8 @@ CG_UpdateCvars
 =================
 */
 void CG_UpdateCvars( void ) {
-	int			i;
-	const cvarTable_t	*cv;
-
-	for ( i = 0, cv = cvarTable ; i < ARRAY_LEN( cvarTable ) ; i++, cv++ ) {
-		trap_Cvar_Update( cv->vmCvar );
+	for ( const cvarTable_t &cv : CvarEntries() ) {
+		trap_Cvar_Update( cv.vmCvar );
 	}
 
 	// check for modications here
@@ -221,24 +274,24 @@ int CG_LastAttacker( void ) {
 
 void QDECL CG_Printf( const char *msg, ... ) {
 	va_list		argptr;
-	char		text[1024];
+	std::array<char, 1024> text{};
 
 	va_start (argptr, msg);
-	Q_vsprintf (text, msg, argptr);
+	Q_vsprintf( text.data(), msg, argptr );
 	va_end (argptr);
 
-	trap_Print( text );
+	trap_Print( text.data() );
 }
 
 void QDECL CG_Error( const char *msg, ... ) {
 	va_list		argptr;
-	char		text[1024];
+	std::array<char, 1024> text{};
 
 	va_start (argptr, msg);
-	Q_vsprintf (text, msg, argptr);
+	Q_vsprintf( text.data(), msg, argptr );
 	va_end (argptr);
 
-	trap_Error( text );
+	trap_Error( text.data() );
 }
 
 #ifndef CGAME_HARD_LINKED
@@ -246,24 +299,24 @@ void QDECL CG_Error( const char *msg, ... ) {
 
 void QDECL Com_Error( int level, const char *error, ... ) {
 	va_list		argptr;
-	char		text[1024];
+	std::array<char, 1024> text{};
 
 	va_start (argptr, error);
-	Q_vsprintf (text, error, argptr);
+	Q_vsprintf( text.data(), error, argptr );
 	va_end (argptr);
 
-	trap_Error( text );
+	trap_Error( text.data() );
 }
 
 void QDECL Com_Printf( const char *msg, ... ) {
 	va_list		argptr;
-	char		text[1024];
+	std::array<char, 1024> text{};
 
 	va_start (argptr, msg);
-	Q_vsprintf (text, msg, argptr);
+	Q_vsprintf( text.data(), msg, argptr );
 	va_end (argptr);
 
-	trap_Print( text );
+	trap_Print( text.data() );
 }
 
 #endif
@@ -275,13 +328,13 @@ CG_Argv
 */
 const char *CG_Argv( int arg ) 
 {
-	static char	buffer[ 2 ][ MAX_STRING_CHARS ];
+	static std::array<std::array<char, MAX_STRING_CHARS>, 2> buffer{};
 	static int index = 0;
 
 	index ^= 1;
-	trap_Argv( arg, buffer[ index ], sizeof( buffer[ 0 ] ) );
+	trap_Argv( arg, buffer[index].data(), buffer[index].size() );
 
-	return buffer[ index ];
+	return buffer[index].data();
 }
 
 
@@ -296,7 +349,7 @@ The server says this item is used on this level
 */
 static void CG_RegisterItemSounds( int itemNum ) {
 	gitem_t			*item;
-	char			data[MAX_QPATH];
+	std::array<char, MAX_QPATH> data{};
 	const char		*s, *start;
 	int				len;
 
@@ -323,14 +376,14 @@ static void CG_RegisterItemSounds( int itemNum ) {
 				item->classname);
 			return;
 		}
-		memcpy (data, start, len);
-		data[len] = 0;
+		std::copy_n( start, len, data.data() );
+		data[len] = '\0';
 		if ( *s ) {
 			s++;
 		}
 
-		if ( !strcmp(data+len-3, "wav" )) {
-			trap_S_RegisterSound( data, qfalse );
+		if ( !strcmp( data.data() + len - 3, "wav" ) ) {
+			trap_S_RegisterSound( data.data(), qfalse );
 		}
 	}
 }
@@ -344,9 +397,8 @@ called during a precache command
 =================
 */
 static void CG_RegisterSounds( void ) {
-	int		i;
-	char	items[MAX_ITEMS+1];
-	char	name[MAX_QPATH];
+	std::array<char, MAX_ITEMS + 1> items{};
+	std::array<char, MAX_QPATH> name{};
 	const char	*soundName;
 
 	// voice commands
@@ -496,47 +548,47 @@ static void CG_RegisterSounds( void ) {
 
 	cgs.media.jumpPadSound = trap_S_RegisterSound ("sound/world/jumppad.wav", qfalse );
 
-	for (i=0 ; i<4 ; i++) {
-		Com_sprintf (name, sizeof(name), "sound/player/footsteps/step%i.wav", i+1);
-		cgs.media.footsteps[FOOTSTEP_NORMAL][i] = trap_S_RegisterSound (name, qfalse);
+	for ( int footstepIndex = 0 ; footstepIndex < 4 ; ++footstepIndex ) {
+		Com_sprintf( name.data(), name.size(), "sound/player/footsteps/step%i.wav", footstepIndex + 1 );
+		cgs.media.footsteps[FOOTSTEP_NORMAL][footstepIndex] = trap_S_RegisterSound( name.data(), qfalse );
 
-		Com_sprintf (name, sizeof(name), "sound/player/footsteps/boot%i.wav", i+1);
-		cgs.media.footsteps[FOOTSTEP_BOOT][i] = trap_S_RegisterSound (name, qfalse);
+		Com_sprintf( name.data(), name.size(), "sound/player/footsteps/boot%i.wav", footstepIndex + 1 );
+		cgs.media.footsteps[FOOTSTEP_BOOT][footstepIndex] = trap_S_RegisterSound( name.data(), qfalse );
 
-		Com_sprintf (name, sizeof(name), "sound/player/footsteps/flesh%i.wav", i+1);
-		cgs.media.footsteps[FOOTSTEP_FLESH][i] = trap_S_RegisterSound (name, qfalse);
+		Com_sprintf( name.data(), name.size(), "sound/player/footsteps/flesh%i.wav", footstepIndex + 1 );
+		cgs.media.footsteps[FOOTSTEP_FLESH][footstepIndex] = trap_S_RegisterSound( name.data(), qfalse );
 
-		Com_sprintf (name, sizeof(name), "sound/player/footsteps/mech%i.wav", i+1);
-		cgs.media.footsteps[FOOTSTEP_MECH][i] = trap_S_RegisterSound (name, qfalse);
+		Com_sprintf( name.data(), name.size(), "sound/player/footsteps/mech%i.wav", footstepIndex + 1 );
+		cgs.media.footsteps[FOOTSTEP_MECH][footstepIndex] = trap_S_RegisterSound( name.data(), qfalse );
 
-		Com_sprintf (name, sizeof(name), "sound/player/footsteps/energy%i.wav", i+1);
-		cgs.media.footsteps[FOOTSTEP_ENERGY][i] = trap_S_RegisterSound (name, qfalse);
+		Com_sprintf( name.data(), name.size(), "sound/player/footsteps/energy%i.wav", footstepIndex + 1 );
+		cgs.media.footsteps[FOOTSTEP_ENERGY][footstepIndex] = trap_S_RegisterSound( name.data(), qfalse );
 
-		Com_sprintf (name, sizeof(name), "sound/player/footsteps/splash%i.wav", i+1);
-		cgs.media.footsteps[FOOTSTEP_SPLASH][i] = trap_S_RegisterSound (name, qfalse);
+		Com_sprintf( name.data(), name.size(), "sound/player/footsteps/splash%i.wav", footstepIndex + 1 );
+		cgs.media.footsteps[FOOTSTEP_SPLASH][footstepIndex] = trap_S_RegisterSound( name.data(), qfalse );
 
-		Com_sprintf (name, sizeof(name), "sound/player/footsteps/clank%i.wav", i+1);
-		cgs.media.footsteps[FOOTSTEP_METAL][i] = trap_S_RegisterSound (name, qfalse);
+		Com_sprintf( name.data(), name.size(), "sound/player/footsteps/clank%i.wav", footstepIndex + 1 );
+		cgs.media.footsteps[FOOTSTEP_METAL][footstepIndex] = trap_S_RegisterSound( name.data(), qfalse );
 	}
 
 	// only register the items that the server says we need
-	Q_strncpyz(items, CG_ConfigString(CS_ITEMS), sizeof(items));
+	Q_strncpyz( items.data(), CG_ConfigString( CS_ITEMS ), items.size() );
 
-	for ( i = 1 ; i < bg_numItems ; i++ ) {
+	for ( int itemNum = 1 ; itemNum < bg_numItems ; ++itemNum ) {
 //		if ( items[ i ] == '1' || cg_buildScript.integer ) {
-			CG_RegisterItemSounds( i );
+			CG_RegisterItemSounds( itemNum );
 //		}
 	}
 
-	for ( i = 1 ; i < MAX_SOUNDS ; i++ ) {
-		soundName = CG_ConfigString( CS_SOUNDS+i );
+	for ( int soundIndex = 1 ; soundIndex < MAX_SOUNDS ; ++soundIndex ) {
+		soundName = CG_ConfigString( CS_SOUNDS + soundIndex );
 		if ( !soundName[0] ) {
 			break;
 		}
 		if ( soundName[0] == '*' ) {
 			continue;	// custom sound
 		}
-		cgs.gameSounds[i] = trap_S_RegisterSound( soundName, qfalse );
+		cgs.gameSounds[soundIndex] = trap_S_RegisterSound( soundName, qfalse );
 	}
 
 	// FIXME: only needed with item
@@ -619,8 +671,8 @@ This function may execute for a couple of minutes with a slow disk.
 */
 static void CG_RegisterGraphics( void ) {
 	int			i;
-	char		items[MAX_ITEMS+1];
-	static char		*sb_nums[11] = {
+	std::array<char, MAX_ITEMS + 1> items{};
+	static constexpr std::array<const char *, 11> sbNums = {
 		"gfx/2d/numbers/zero_32b",
 		"gfx/2d/numbers/one_32b",
 		"gfx/2d/numbers/two_32b",
@@ -635,7 +687,7 @@ static void CG_RegisterGraphics( void ) {
 	};
 
 	// clear any references to old media
-	memset( &cg.refdef, 0, sizeof( cg.refdef ) );
+	cg.refdef = refdef_t{};
 	trap_R_ClearScene();
 
 	CG_LoadingString( cgs.mapname );
@@ -645,8 +697,8 @@ static void CG_RegisterGraphics( void ) {
 	// precache status bar pics
 	CG_LoadingString( "game media" );
 
-	for ( i = 0 ; i < ARRAY_LEN( sb_nums ) ; i++ ) {
-		cgs.media.numberShaders[i] = trap_R_RegisterShader( sb_nums[i] );
+	for ( std::size_t shaderIndex = 0; shaderIndex < sbNums.size(); ++shaderIndex ) {
+		cgs.media.numberShaders[shaderIndex] = trap_R_RegisterShader( sbNums[shaderIndex] );
 	}
 
 	cgs.media.botSkillShaders[0] = trap_R_RegisterShader( "menu/art/skill1.tga" );
@@ -827,14 +879,14 @@ static void CG_RegisterGraphics( void ) {
 	cgs.media.medalCapture = trap_R_RegisterShaderNoMip( "medal_capture" );
 
 
-	memset( cg_items, 0, sizeof( cg_items ) );
-	memset( cg_weapons, 0, sizeof( cg_weapons ) );
+	std::fill_n( cg_items, MAX_ITEMS, itemInfo_t{} );
+	std::fill_n( cg_weapons, MAX_WEAPONS, weaponInfo_t{} );
 
 	// only register the items that the server says we need
-	Q_strncpyz( items, CG_ConfigString(CS_ITEMS), sizeof( items ) );
+	Q_strncpyz( items.data(), CG_ConfigString( CS_ITEMS ), items.size() );
 
 	for ( i = 1 ; i < bg_numItems ; i++ ) {
-		if ( items[ i ] == '1' || cg_buildScript.integer ) {
+		if ( items[i] == '1' || cg_buildScript.integer ) {
 			CG_LoadingItem( i );
 			CG_RegisterItemVisuals( i );
 		}
@@ -927,16 +979,15 @@ CG_BuildSpectatorString
 =======================
 */
 void CG_BuildSpectatorString( void ) {
-	int i;
-	cg.spectatorList[0] = 0;
-	for (i = 0; i < MAX_CLIENTS; i++) {
-		if (cgs.clientinfo[i].infoValid && cgs.clientinfo[i].team == TEAM_SPECTATOR ) {
-			Q_strcat(cg.spectatorList, sizeof(cg.spectatorList), va("%s     ", cgs.clientinfo[i].name));
+	cg.spectatorList[0] = '\0';
+	for ( const clientInfo_t &clientInfo : cgs.clientinfo ) {
+		if ( clientInfo.infoValid && clientInfo.team == TEAM_SPECTATOR ) {
+			Q_strcat( cg.spectatorList, sizeof( cg.spectatorList ), va( "%s     ", clientInfo.name ) );
 		}
 	}
-	i = strlen(cg.spectatorList);
-	if (i != cg.spectatorLen) {
-		cg.spectatorLen = i;
+	const int spectatorLen = strlen( cg.spectatorList );
+	if ( spectatorLen != cg.spectatorLen ) {
+		cg.spectatorLen = spectatorLen;
 		cg.spectatorWidth = -1;
 	}
 }
@@ -948,24 +999,22 @@ CG_RegisterClients
 ===================
 */
 static void CG_RegisterClients( void ) {
-	int		i;
+	CG_LoadingClient( cg.clientNum );
+	CG_NewClientInfo( cg.clientNum );
 
-	CG_LoadingClient(cg.clientNum);
-	CG_NewClientInfo(cg.clientNum);
+	for ( int clientNum = 0 ; clientNum < MAX_CLIENTS ; ++clientNum ) {
+		const char *clientInfo;
 
-	for (i=0 ; i<MAX_CLIENTS ; i++) {
-		const char		*clientInfo;
-
-		if (cg.clientNum == i) {
+		if ( cg.clientNum == clientNum ) {
 			continue;
 		}
 
-		clientInfo = CG_ConfigString( CS_PLAYERS+i );
+		clientInfo = CG_ConfigString( CS_PLAYERS + clientNum );
 		if ( !clientInfo[0]) {
 			continue;
 		}
-		CG_LoadingClient( i );
-		CG_NewClientInfo( i );
+		CG_LoadingClient( clientNum );
+		CG_NewClientInfo( clientNum );
 	}
 	CG_BuildSpectatorString();
 }
@@ -994,15 +1043,15 @@ CG_StartMusic
 ======================
 */
 void CG_StartMusic( void ) {
-	char	*s;
-	char	parm1[MAX_QPATH], parm2[MAX_QPATH];
+	char *musicCursor = (char *)CG_ConfigString( CS_MUSIC );
+	std::array<char, MAX_QPATH> introTrack{};
+	std::array<char, MAX_QPATH> loopTrack{};
 
 	// start the background music
-	s = (char *)CG_ConfigString( CS_MUSIC );
-	Q_strncpyz( parm1, COM_Parse( &s ), sizeof( parm1 ) );
-	Q_strncpyz( parm2, COM_Parse( &s ), sizeof( parm2 ) );
+	Q_strncpyz( introTrack.data(), COM_Parse( &musicCursor ), introTrack.size() );
+	Q_strncpyz( loopTrack.data(), COM_Parse( &musicCursor ), loopTrack.size() );
 
-	trap_S_StartBackgroundTrack( parm1, parm2 );
+	trap_S_StartBackgroundTrack( introTrack.data(), loopTrack.data() );
 }
 
 #ifdef MISSIONPACK
@@ -1330,74 +1379,53 @@ static qboolean CG_OwnerDrawHandleKey(int ownerDraw, int flags, float *special, 
 
 
 static int CG_FeederCount(float feederID) {
-	int i, count;
-	count = 0;
 	if (feederID == FEEDER_REDTEAM_LIST) {
-		for (i = 0; i < cg.numScores; i++) {
-			if (cg.scores[i].team == TEAM_RED) {
-				count++;
-			}
-		}
+		return CountScoresForTeam( TEAM_RED );
 	} else if (feederID == FEEDER_BLUETEAM_LIST) {
-		for (i = 0; i < cg.numScores; i++) {
-			if (cg.scores[i].team == TEAM_BLUE) {
-				count++;
-			}
-		}
+		return CountScoresForTeam( TEAM_BLUE );
 	} else if (feederID == FEEDER_SCOREBOARD) {
 		return cg.numScores;
 	}
-	return count;
+	return 0;
 }
 
 
 void CG_SetScoreSelection(void *p) {
-	menuDef_t *menu = (menuDef_t*)p;
+	menuDef_t *menu = static_cast<menuDef_t *>( p );
 	playerState_t *ps = &cg.snap->ps;
-	int i, red, blue;
-	red = blue = 0;
-	for (i = 0; i < cg.numScores; i++) {
-		if (cg.scores[i].team == TEAM_RED) {
-			red++;
-		} else if (cg.scores[i].team == TEAM_BLUE) {
-			blue++;
-		}
-		if (ps->clientNum == cg.scores[i].client) {
-			cg.selectedScore = i;
-		}
+	const int red = CountScoresForTeam( TEAM_RED );
+	const int blue = CountScoresForTeam( TEAM_BLUE );
+	const int selectedScore = FindScoreIndexForClient( ps->clientNum );
+
+	if ( selectedScore >= 0 ) {
+		cg.selectedScore = selectedScore;
 	}
 
-	if (menu == NULL) {
+	if (menu == nullptr) {
 		// just interested in setting the selected score
 		return;
 	}
 
 	if ( cgs.gametype >= GT_TEAM ) {
 		int feeder = FEEDER_REDTEAM_LIST;
-		i = red;
+		int selection = red;
 		if (cg.scores[cg.selectedScore].team == TEAM_BLUE) {
 			feeder = FEEDER_BLUETEAM_LIST;
-			i = blue;
+			selection = blue;
 		}
-		Menu_SetFeederSelection(menu, feeder, i, NULL);
+		Menu_SetFeederSelection( menu, feeder, selection, nullptr );
 	} else {
-		Menu_SetFeederSelection(menu, FEEDER_SCOREBOARD, cg.selectedScore, NULL);
+		Menu_SetFeederSelection( menu, FEEDER_SCOREBOARD, cg.selectedScore, nullptr );
 	}
 }
 
 // FIXME: might need to cache this info
 static clientInfo_t * CG_InfoFromScoreIndex(int index, int team, int *scoreIndex) {
-	int i, count;
-	if ( cgs.gametype >= GT_TEAM ) {
-		count = 0;
-		for (i = 0; i < cg.numScores; i++) {
-			if (cg.scores[i].team == team) {
-				if (count == index) {
-					*scoreIndex = i;
-					return &cgs.clientinfo[cg.scores[i].client];
-				}
-				count++;
-			}
+	if ( cgs.gametype >= GT_TEAM && team >= 0 ) {
+		const int resolvedScoreIndex = FindScoreIndexInTeamList( index, static_cast<team_t>( team ) );
+		if ( resolvedScoreIndex >= 0 ) {
+			*scoreIndex = resolvedScoreIndex;
+			return &cgs.clientinfo[cg.scores[resolvedScoreIndex].client];
 		}
 	}
 	*scoreIndex = index;
@@ -1494,16 +1522,9 @@ static qhandle_t CG_FeederItemImage(float feederID, int index) {
 
 static void CG_FeederSelection(float feederID, int index) {
 	if ( cgs.gametype >= GT_TEAM ) {
-		int i, count;
-		int team = (feederID == FEEDER_REDTEAM_LIST) ? TEAM_RED : TEAM_BLUE;
-		count = 0;
-		for (i = 0; i < cg.numScores; i++) {
-			if (cg.scores[i].team == team) {
-				if (index == count) {
-					cg.selectedScore = i;
-				}
-				count++;
-			}
+		const int scoreIndex = FindScoreIndexInTeamList( index, feederID == FEEDER_REDTEAM_LIST ? TEAM_RED : TEAM_BLUE );
+		if ( scoreIndex >= 0 ) {
+			cg.selectedScore = scoreIndex;
 		}
 	} else {
 		cg.selectedScore = index;
@@ -1511,10 +1532,9 @@ static void CG_FeederSelection(float feederID, int index) {
 }
 
 static float CG_Cvar_Get(const char *cvar) {
-	char buff[128];
-	memset(buff, 0, sizeof(buff));
-	trap_Cvar_VariableStringBuffer(cvar, buff, sizeof(buff));
-	return atof(buff);
+	std::array<char, 128> buff{};
+	trap_Cvar_VariableStringBuffer( cvar, buff.data(), buff.size() );
+	return atof( buff.data() );
 }
 
 void CG_Text_PaintWithCursor(float x, float y, float scale, vec4_t color, const char *text, int cursorPos, char cursor, int limit, int style) {
@@ -1567,7 +1587,7 @@ CG_LoadHudMenu();
 =================
 */
 void CG_LoadHudMenu( void ) {
-	char buff[1024];
+	std::array<char, 1024> hudSetBuffer{};
 	const char *hudSet;
 
 	cgDC.registerShaderNoMip = &trap_R_RegisterShaderNoMip;
@@ -1624,13 +1644,13 @@ void CG_LoadHudMenu( void ) {
 
 	Menu_Reset();
 	
-	trap_Cvar_VariableStringBuffer("cg_hudFiles", buff, sizeof(buff));
-	hudSet = buff;
-	if (hudSet[0] == '\0') {
+	trap_Cvar_VariableStringBuffer( "cg_hudFiles", hudSetBuffer.data(), static_cast<int>( hudSetBuffer.size() ) );
+	hudSet = hudSetBuffer.data();
+	if ( hudSetBuffer.front() == '\0' ) {
 		hudSet = "ui/hud.txt";
 	}
 
-	CG_LoadMenus(hudSet);
+	CG_LoadMenus( hudSet );
 }
 
 void CG_AssetCache( void ) {
@@ -1667,41 +1687,41 @@ Will perform callbacks to make the loading info screen update.
 =================
 */
 void CG_Init( int serverMessageNum, int serverCommandSequence, int clientNum ) {
-	char  value[MAX_CVAR_VALUE_STRING];
+	std::array<char, MAX_CVAR_VALUE_STRING> value{};
 	const char	*s;
 
 	// clear everything
-	memset( &cgs, 0, sizeof( cgs ) );
-	memset( &cg, 0, sizeof( cg ) );
-	memset( cg_entities, 0, sizeof(cg_entities) );
-	memset( cg_weapons, 0, sizeof(cg_weapons) );
-	memset( cg_items, 0, sizeof(cg_items) );
+	cgs = cgs_t{};
+	cg = cg_t{};
+	std::fill_n( cg_entities, MAX_GENTITIES, centity_t{} );
+	std::fill_n( cg_weapons, MAX_WEAPONS, weaponInfo_t{} );
+	std::fill_n( cg_items, MAX_ITEMS, itemInfo_t{} );
 
 	cg.clientNum = clientNum;
 
 	cgs.processedSnapshotNum = serverMessageNum;
 	cgs.serverCommandSequence = serverCommandSequence;
 
-	trap_Cvar_VariableStringBuffer( "//trap_GetValue", value, sizeof( value ) );
+	trap_Cvar_VariableStringBuffer( "//trap_GetValue", value.data(), value.size() );
 	if ( value[0] ) {
 #ifdef Q3_VM
-		trap_GetValue = (void*)~atoi( value );
-		if ( trap_GetValue( value, sizeof( value ), "trap_R_AddRefEntityToScene2" ) ) {
-			trap_R_AddRefEntityToScene2 = (void*)~atoi( value );
+		trap_GetValue = (void*)~atoi( value.data() );
+		if ( trap_GetValue( value.data(), value.size(), "trap_R_AddRefEntityToScene2" ) ) {
+			trap_R_AddRefEntityToScene2 = (void*)~atoi( value.data() );
 			intShaderTime = qtrue;
 		}
-		if ( trap_GetValue( value, sizeof( value ), "trap_R_AddLinearLightToScene_Q3E" ) ) {
-			trap_R_AddLinearLightToScene = (void*)~atoi( value );
+		if ( trap_GetValue( value.data(), value.size(), "trap_R_AddLinearLightToScene_Q3E" ) ) {
+			trap_R_AddLinearLightToScene = (void*)~atoi( value.data() );
 			linearLight = qtrue;
 		}
 #else
-		dll_com_trapGetValue = atoi( value );
-		if ( trap_GetValue( value, sizeof( value ), "trap_R_AddRefEntityToScene2" ) ) {
-			dll_trap_R_AddRefEntityToScene2 = atoi( value );
+		dll_com_trapGetValue = atoi( value.data() );
+		if ( trap_GetValue( value.data(), value.size(), "trap_R_AddRefEntityToScene2" ) ) {
+			dll_trap_R_AddRefEntityToScene2 = atoi( value.data() );
 			intShaderTime = qtrue;
 		}
-		if ( trap_GetValue( value, sizeof( value ), "trap_R_AddLinearLightToScene_Q3E" ) ) {
-			dll_trap_R_AddLinearLightToScene = atoi( value );
+		if ( trap_GetValue( value.data(), value.size(), "trap_R_AddLinearLightToScene_Q3E" ) ) {
+			dll_trap_R_AddLinearLightToScene = atoi( value.data() );
 			linearLight = qtrue;
 		}
 #endif

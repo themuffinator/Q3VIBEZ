@@ -1,6 +1,9 @@
 // Copyright (C) 1999-2000 Id Software, Inc.
 //
 
+#include <algorithm>
+#include <array>
+
 #include "g_local.h"
 
 qboolean	G_SpawnString( const char *key, const char *defaultString, char **out ) {
@@ -67,44 +70,17 @@ typedef enum {
 	F_IGNORE
 } fieldtype_t;
 
-typedef struct
-{
+struct field_t {
 	const char *name;
 	intptr_t	ofs;
 	fieldtype_t	type;
 	//int		flags;
-} field_t;
-
-const field_t fields[] = {
-	{"classname", FOFS(classname), F_LSTRING},
-	{"origin", FOFS(s.origin), F_VECTOR},
-	{"model", FOFS(model), F_LSTRING},
-	{"model2", FOFS(model2), F_LSTRING},
-	{"spawnflags", FOFS(spawnflags), F_INT},
-	{"speed", FOFS(speed), F_FLOAT},
-	{"target", FOFS(target), F_LSTRING},
-	{"targetname", FOFS(targetname), F_LSTRING},
-	{"message", FOFS(message), F_LSTRING},
-	{"team", FOFS(team), F_LSTRING},
-	{"wait", FOFS(wait), F_FLOAT},
-	{"random", FOFS(random), F_FLOAT},
-	{"count", FOFS(count), F_INT},
-	{"health", FOFS(health), F_INT},
-	{"light", 0, F_IGNORE},
-	{"dmg", FOFS(damage), F_INT},
-	{"angles", FOFS(s.angles), F_VECTOR},
-	{"angle", FOFS(s.angles), F_ANGLEHACK},
-	{"targetShaderName", FOFS(targetShaderName), F_LSTRING},
-	{"targetShaderNewName", FOFS(targetShaderNewName), F_LSTRING},
-
-	{NULL}
 };
 
-
-typedef struct {
-	char	*name;
+struct spawn_t {
+	const char *name;
 	void	(*spawn)(gentity_t *ent);
-} spawn_t;
+};
 
 void SP_info_player_start (gentity_t *ent);
 void SP_info_player_deathmatch (gentity_t *ent);
@@ -172,82 +148,167 @@ void SP_team_redobelisk( gentity_t *ent );
 void SP_team_neutralobelisk( gentity_t *ent );
 #endif
 void SP_item_botroam( gentity_t *ent ) {};
+char *G_AddSpawnVarToken( const char *string );
 
-spawn_t	spawns[] = {
+namespace {
+const std::array fields{
+	field_t{ "classname", FOFS(classname), F_LSTRING },
+	field_t{ "origin", FOFS(s.origin), F_VECTOR },
+	field_t{ "model", FOFS(model), F_LSTRING },
+	field_t{ "model2", FOFS(model2), F_LSTRING },
+	field_t{ "spawnflags", FOFS(spawnflags), F_INT },
+	field_t{ "speed", FOFS(speed), F_FLOAT },
+	field_t{ "target", FOFS(target), F_LSTRING },
+	field_t{ "targetname", FOFS(targetname), F_LSTRING },
+	field_t{ "message", FOFS(message), F_LSTRING },
+	field_t{ "team", FOFS(team), F_LSTRING },
+	field_t{ "wait", FOFS(wait), F_FLOAT },
+	field_t{ "random", FOFS(random), F_FLOAT },
+	field_t{ "count", FOFS(count), F_INT },
+	field_t{ "health", FOFS(health), F_INT },
+	field_t{ "light", 0, F_IGNORE },
+	field_t{ "dmg", FOFS(damage), F_INT },
+	field_t{ "angles", FOFS(s.angles), F_VECTOR },
+	field_t{ "angle", FOFS(s.angles), F_ANGLEHACK },
+	field_t{ "targetShaderName", FOFS(targetShaderName), F_LSTRING },
+	field_t{ "targetShaderNewName", FOFS(targetShaderNewName), F_LSTRING },
+};
+
+const std::array spawns{
 	// info entities don't do anything at all, but provide positional
 	// information for things controlled by other processes
-	{"info_player_start", SP_info_player_start},
-	{"info_player_deathmatch", SP_info_player_deathmatch},
-	{"info_player_intermission", SP_info_player_intermission},
-	{"info_null", SP_info_null},
-	{"info_notnull", SP_info_notnull},		// use target_position instead
-	{"info_camp", SP_info_camp},
+	spawn_t{ "info_player_start", SP_info_player_start },
+	spawn_t{ "info_player_deathmatch", SP_info_player_deathmatch },
+	spawn_t{ "info_player_intermission", SP_info_player_intermission },
+	spawn_t{ "info_null", SP_info_null },
+	spawn_t{ "info_notnull", SP_info_notnull },		// use target_position instead
+	spawn_t{ "info_camp", SP_info_camp },
 
-	{"func_plat", SP_func_plat},
-	{"func_button", SP_func_button},
-	{"func_door", SP_func_door},
-	{"func_static", SP_func_static},
-	{"func_rotating", SP_func_rotating},
-	{"func_bobbing", SP_func_bobbing},
-	{"func_pendulum", SP_func_pendulum},
-	{"func_train", SP_func_train},
-	{"func_group", SP_info_null},
-	{"func_timer", SP_func_timer},			// rename trigger_timer?
+	spawn_t{ "func_plat", SP_func_plat },
+	spawn_t{ "func_button", SP_func_button },
+	spawn_t{ "func_door", SP_func_door },
+	spawn_t{ "func_static", SP_func_static },
+	spawn_t{ "func_rotating", SP_func_rotating },
+	spawn_t{ "func_bobbing", SP_func_bobbing },
+	spawn_t{ "func_pendulum", SP_func_pendulum },
+	spawn_t{ "func_train", SP_func_train },
+	spawn_t{ "func_group", SP_info_null },
+	spawn_t{ "func_timer", SP_func_timer },			// rename trigger_timer?
 
 	// Triggers are brush objects that cause an effect when contacted
 	// by a living player, usually involving firing targets.
 	// While almost everything could be done with
 	// a single trigger class and different targets, triggered effects
 	// could not be client side predicted (push and teleport).
-	{"trigger_always", SP_trigger_always},
-	{"trigger_multiple", SP_trigger_multiple},
-	{"trigger_push", SP_trigger_push},
-	{"trigger_teleport", SP_trigger_teleport},
-	{"trigger_hurt", SP_trigger_hurt},
+	spawn_t{ "trigger_always", SP_trigger_always },
+	spawn_t{ "trigger_multiple", SP_trigger_multiple },
+	spawn_t{ "trigger_push", SP_trigger_push },
+	spawn_t{ "trigger_teleport", SP_trigger_teleport },
+	spawn_t{ "trigger_hurt", SP_trigger_hurt },
 
 	// targets perform no action by themselves, but must be triggered
 	// by another entity
-	{"target_give", SP_target_give},
-	{"target_remove_powerups", SP_target_remove_powerups},
-	{"target_delay", SP_target_delay},
-	{"target_speaker", SP_target_speaker},
-	{"target_print", SP_target_print},
-	{"target_laser", SP_target_laser},
-	{"target_score", SP_target_score},
-	{"target_teleporter", SP_target_teleporter},
-	{"target_relay", SP_target_relay},
-	{"target_kill", SP_target_kill},
-	{"target_position", SP_target_position},
-	{"target_location", SP_target_location},
-	{"target_push", SP_target_push},
+	spawn_t{ "target_give", SP_target_give },
+	spawn_t{ "target_remove_powerups", SP_target_remove_powerups },
+	spawn_t{ "target_delay", SP_target_delay },
+	spawn_t{ "target_speaker", SP_target_speaker },
+	spawn_t{ "target_print", SP_target_print },
+	spawn_t{ "target_laser", SP_target_laser },
+	spawn_t{ "target_score", SP_target_score },
+	spawn_t{ "target_teleporter", SP_target_teleporter },
+	spawn_t{ "target_relay", SP_target_relay },
+	spawn_t{ "target_kill", SP_target_kill },
+	spawn_t{ "target_position", SP_target_position },
+	spawn_t{ "target_location", SP_target_location },
+	spawn_t{ "target_push", SP_target_push },
 
-	{"light", SP_light},
-	{"path_corner", SP_path_corner},
+	spawn_t{ "light", SP_light },
+	spawn_t{ "path_corner", SP_path_corner },
 
-	{"misc_teleporter_dest", SP_misc_teleporter_dest},
-	{"misc_model", SP_misc_model},
-	{"misc_portal_surface", SP_misc_portal_surface},
-	{"misc_portal_camera", SP_misc_portal_camera},
+	spawn_t{ "misc_teleporter_dest", SP_misc_teleporter_dest },
+	spawn_t{ "misc_model", SP_misc_model },
+	spawn_t{ "misc_portal_surface", SP_misc_portal_surface },
+	spawn_t{ "misc_portal_camera", SP_misc_portal_camera },
 
-	{"shooter_rocket", SP_shooter_rocket},
-	{"shooter_grenade", SP_shooter_grenade},
-	{"shooter_plasma", SP_shooter_plasma},
+	spawn_t{ "shooter_rocket", SP_shooter_rocket },
+	spawn_t{ "shooter_grenade", SP_shooter_grenade },
+	spawn_t{ "shooter_plasma", SP_shooter_plasma },
 
-	{"team_CTF_redplayer", SP_team_CTF_redplayer},
-	{"team_CTF_blueplayer", SP_team_CTF_blueplayer},
+	spawn_t{ "team_CTF_redplayer", SP_team_CTF_redplayer },
+	spawn_t{ "team_CTF_blueplayer", SP_team_CTF_blueplayer },
 
-	{"team_CTF_redspawn", SP_team_CTF_redspawn},
-	{"team_CTF_bluespawn", SP_team_CTF_bluespawn},
+	spawn_t{ "team_CTF_redspawn", SP_team_CTF_redspawn },
+	spawn_t{ "team_CTF_bluespawn", SP_team_CTF_bluespawn },
 
 #ifdef MISSIONPACK
-	{"team_redobelisk", SP_team_redobelisk},
-	{"team_blueobelisk", SP_team_blueobelisk},
-	{"team_neutralobelisk", SP_team_neutralobelisk},
+	spawn_t{ "team_redobelisk", SP_team_redobelisk },
+	spawn_t{ "team_blueobelisk", SP_team_blueobelisk },
+	spawn_t{ "team_neutralobelisk", SP_team_neutralobelisk },
 #endif
-	{"item_botroam", SP_item_botroam},
-
-	{0, 0}
+	spawn_t{ "item_botroam", SP_item_botroam },
 };
+
+constexpr std::array gametypeNames{
+	"ffa",
+	"tournament",
+	"single",
+	"team",
+	"ctf",
+	"oneflag",
+	"obelisk",
+	"harvester",
+	"teamtournament",
+};
+
+auto FindSpawnField( const char *key ) -> const field_t * {
+	for ( const auto &field : fields ) {
+		if ( !Q_stricmp( field.name, key ) ) {
+			return &field;
+		}
+	}
+	return nullptr;
+}
+
+auto FindSpawnHandler( const char *classname ) -> const spawn_t * {
+	for ( const auto &spawn : spawns ) {
+		if ( !strcmp( spawn.name, classname ) ) {
+			return &spawn;
+		}
+	}
+	return nullptr;
+}
+
+void ParseVectorField( const char *value, vec3_t out ) {
+	Q_sscanf( value, "%f %f %f", &out[0], &out[1], &out[2] );
+}
+
+auto GetEntityToken( std::array<char, MAX_TOKEN_CHARS> &token ) -> qboolean {
+	return trap_GetEntityToken( token.data(), token.size() );
+}
+
+void ReadEntityTokenOrError( std::array<char, MAX_TOKEN_CHARS> &token, const char *error ) {
+	if ( !GetEntityToken( token ) ) {
+		G_Error( "%s", error );
+	}
+}
+
+auto CurrentGameTypeName() -> const char * {
+	if ( g_gametype.integer < GT_FFA || g_gametype.integer >= GT_MAX_GAME_TYPE ) {
+		return nullptr;
+	}
+	return gametypeNames[g_gametype.integer];
+}
+
+void AddSpawnVar( const char *key, const char *value ) {
+	if ( level.numSpawnVars == MAX_SPAWN_VARS ) {
+		G_Error( "G_ParseSpawnVars: MAX_SPAWN_VARS" );
+	}
+
+	level.spawnVars[ level.numSpawnVars ][0] = G_AddSpawnVarToken( key );
+	level.spawnVars[ level.numSpawnVars ][1] = G_AddSpawnVarToken( value );
+	level.numSpawnVars++;
+}
+}
 
 /*
 ===============
@@ -258,7 +319,6 @@ returning qfalse if not found
 ===============
 */
 qboolean G_CallSpawn( gentity_t *ent ) {
-	spawn_t	*s;
 	gitem_t	*item;
 
 	if ( !ent->classname ) {
@@ -275,12 +335,9 @@ qboolean G_CallSpawn( gentity_t *ent ) {
 	}
 
 	// check normal spawn functions
-	for ( s=spawns ; s->name ; s++ ) {
-		if ( !strcmp(s->name, ent->classname) ) {
-			// found it
-			s->spawn(ent);
-			return qtrue;
-		}
+	if ( const auto *spawn = FindSpawnHandler( ent->classname ) ) {
+		spawn->spawn( ent );
+		return qtrue;
 	}
 	G_Printf ("%s doesn't have a spawn function\n", ent->classname);
 	return qfalse;
@@ -333,44 +390,41 @@ in a gentity
 ===============
 */
 void G_ParseField( const char *key, const char *value, gentity_t *ent ) {
-	const field_t *f;
 	byte	*b;
 	float	v;
 	vec3_t	vec;
 
-	for ( f=fields ; f->name ; f++ ) {
-		if ( !Q_stricmp(f->name, key) ) {
-			// found it
-			b = (byte *)ent;
+	const field_t *f = FindSpawnField( key );
+	if ( !f ) {
+		return;
+	}
 
-			switch( f->type ) {
-			case F_LSTRING:
-				*(char **)(b+f->ofs) = G_NewString (value);
-				break;
-			case F_VECTOR:
-				Q_sscanf (value, "%f %f %f", &vec[0], &vec[1], &vec[2]);
-				((float *)(b+f->ofs))[0] = vec[0];
-				((float *)(b+f->ofs))[1] = vec[1];
-				((float *)(b+f->ofs))[2] = vec[2];
-				break;
-			case F_INT:
-				*(int *)(b+f->ofs) = atoi(value);
-				break;
-			case F_FLOAT:
-				*(float *)(b+f->ofs) = atof(value);
-				break;
-			case F_ANGLEHACK:
-				v = atof(value);
-				((float *)(b+f->ofs))[0] = 0;
-				((float *)(b+f->ofs))[1] = v;
-				((float *)(b+f->ofs))[2] = 0;
-				break;
-			default:
-			case F_IGNORE:
-				break;
-			}
-			return;
-		}
+	b = (byte *)ent;
+	switch( f->type ) {
+	case F_LSTRING:
+		*(char **)(b+f->ofs) = G_NewString (value);
+		break;
+	case F_VECTOR:
+		ParseVectorField( value, vec );
+		((float *)(b+f->ofs))[0] = vec[0];
+		((float *)(b+f->ofs))[1] = vec[1];
+		((float *)(b+f->ofs))[2] = vec[2];
+		break;
+	case F_INT:
+		*(int *)(b+f->ofs) = atoi(value);
+		break;
+	case F_FLOAT:
+		*(float *)(b+f->ofs) = atof(value);
+		break;
+	case F_ANGLEHACK:
+		v = atof(value);
+		((float *)(b+f->ofs))[0] = 0;
+		((float *)(b+f->ofs))[1] = v;
+		((float *)(b+f->ofs))[2] = 0;
+		break;
+	default:
+	case F_IGNORE:
+		break;
 	}
 }
 
@@ -388,8 +442,7 @@ level.spawnVars[], then call the class specfic spawn function
 void G_SpawnGEntityFromSpawnVars( void ) {
 	int			i;
 	gentity_t	*ent;
-	char		*s, *value, *gametypeName;
-	static char *gametypeNames[] = {"ffa", "tournament", "single", "team", "ctf", "oneflag", "obelisk", "harvester", "teamtournament"};
+	char		*s, *value;
 
 	// get the next free entity
 	ent = G_Spawn();
@@ -436,9 +489,7 @@ void G_SpawnGEntityFromSpawnVars( void ) {
 #endif
 
 	if( G_SpawnString( "gametype", NULL, &value ) ) {
-		if( g_gametype.integer >= GT_FFA && g_gametype.integer < GT_MAX_GAME_TYPE ) {
-			gametypeName = gametypeNames[g_gametype.integer];
-
+		if ( const auto *gametypeName = CurrentGameTypeName() ) {
 			s = strstr( value, gametypeName );
 			if( !s ) {
 				G_FreeEntity( ent );
@@ -492,46 +543,37 @@ This does not actually spawn an entity.
 ====================
 */
 qboolean G_ParseSpawnVars( void ) {
-	char		keyname[MAX_TOKEN_CHARS];
-	char		com_token[MAX_TOKEN_CHARS];
+	std::array<char, MAX_TOKEN_CHARS> keyname{};
+	std::array<char, MAX_TOKEN_CHARS> token{};
 
 	level.numSpawnVars = 0;
 	level.numSpawnVarChars = 0;
 
 	// parse the opening brace
-	if ( !trap_GetEntityToken( com_token, sizeof( com_token ) ) ) {
+	if ( !GetEntityToken( token ) ) {
 		// end of spawn string
 		return qfalse;
 	}
-	if ( com_token[0] != '{' ) {
-		G_Error( "G_ParseSpawnVars: found %s when expecting {",com_token );
+	if ( token[0] != '{' ) {
+		G_Error( "G_ParseSpawnVars: found %s when expecting {", token.data() );
 	}
 
 	// go through all the key / value pairs
 	while ( 1 ) {	
 		// parse key
-		if ( !trap_GetEntityToken( keyname, sizeof( keyname ) ) ) {
-			G_Error( "G_ParseSpawnVars: EOF without closing brace" );
-		}
+		ReadEntityTokenOrError( keyname, "G_ParseSpawnVars: EOF without closing brace" );
 
 		if ( keyname[0] == '}' ) {
 			break;
 		}
 		
 		// parse value	
-		if ( !trap_GetEntityToken( com_token, sizeof( com_token ) ) ) {
-			G_Error( "G_ParseSpawnVars: EOF without closing brace" );
-		}
+		ReadEntityTokenOrError( token, "G_ParseSpawnVars: EOF without closing brace" );
 
-		if ( com_token[0] == '}' ) {
+		if ( token[0] == '}' ) {
 			G_Error( "G_ParseSpawnVars: closing brace without data" );
 		}
-		if ( level.numSpawnVars == MAX_SPAWN_VARS ) {
-			G_Error( "G_ParseSpawnVars: MAX_SPAWN_VARS" );
-		}
-		level.spawnVars[ level.numSpawnVars ][0] = G_AddSpawnVarToken( keyname );
-		level.spawnVars[ level.numSpawnVars ][1] = G_AddSpawnVarToken( com_token );
-		level.numSpawnVars++;
+		AddSpawnVar( keyname.data(), token.data() );
 	}
 
 	return qtrue;

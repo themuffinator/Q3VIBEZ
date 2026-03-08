@@ -5,12 +5,38 @@
 
 #include "g_local.h"
 
+#include <array>
+
 static	float	s_quadFactor;
 static	vec3_t	forward, right, up;
 static	vec3_t	muzzle;
 static	vec3_t	muzzle_origin; // for hitscan weapon trace
 
 #define NUM_NAILSHOTS 15
+
+namespace {
+
+void TraceWeaponShot( trace_t &trace, const vec3_t start, const vec3_t end, const int passEntityNum ) {
+	trap_Trace( &trace, start, nullptr, nullptr, end, passEntityNum, MASK_SHOT );
+}
+
+void TraceWeaponShotUnlagged( trace_t &trace, gentity_t &shooter, const vec3_t start, const vec3_t end, const int passEntityNum ) {
+	G_DoTimeShiftFor( &shooter );
+	TraceWeaponShot( trace, start, end, passEntityNum );
+	G_UndoTimeShiftFor( &shooter );
+}
+
+[[nodiscard]] auto EntityFromTrace( const trace_t &trace ) -> gentity_t * {
+	return &g_entities[ trace.entityNum ];
+}
+
+void ReleaseGrappleHook( gentity_t &hook ) {
+	hook.parent->client->hook = nullptr;
+	hook.parent->client->ps.pm_flags &= ~PMF_GRAPPLE_PULL;
+	G_FreeEntity( &hook );
+}
+
+} // namespace
 
 
 /*
@@ -76,7 +102,7 @@ qboolean CheckGauntletAttack( gentity_t *ent ) {
 
 	VectorMA( muzzle_origin, ( 32.0 + 14.0 ), forward, end );
 
-	trap_Trace( &tr, muzzle_origin, NULL, NULL, end, ent->s.number, MASK_SHOT );
+	TraceWeaponShot( tr, muzzle_origin, end, ent->s.number );
 	if ( tr.surfaceFlags & SURF_NOIMPACT ) {
 		return qfalse;
 	}
@@ -85,7 +111,7 @@ qboolean CheckGauntletAttack( gentity_t *ent ) {
 		return qfalse;
 	}
 
-	traceEnt = &g_entities[ tr.entityNum ];
+	traceEnt = EntityFromTrace( tr );
 
 	// send blood impact
 	if ( traceEnt->takedamage && traceEnt->client ) {
@@ -186,18 +212,12 @@ static void Bullet_Fire( gentity_t *ent, float spread, int damage ) {
 	passent = ent->s.number;
 	for ( i = 0; i < 10; i++ ) {
 
-		// unlagged
-		G_DoTimeShiftFor( ent );
-
-		trap_Trace( &tr, muzzle_origin, NULL, NULL, end, passent, MASK_SHOT );
-
-		// unlagged
-		G_UndoTimeShiftFor( ent );
+		TraceWeaponShotUnlagged( tr, *ent, muzzle_origin, end, passent );
 
 		if ( tr.surfaceFlags & SURF_NOIMPACT )
 			return;
 
-		traceEnt = &g_entities[ tr.entityNum ];
+		traceEnt = EntityFromTrace( tr );
 
 		// snap the endpos to integers, but nudged towards the line
 		SnapVectorTowards( tr.endpos, muzzle_origin );
@@ -292,8 +312,8 @@ static qboolean ShotgunPellet( const vec3_t start, const vec3_t end, gentity_t *
 	VectorCopy( end, tr_end );
 
 	for ( i = 0; i < 10; i++ ) {
-		trap_Trace( &tr, tr_start, NULL, NULL, tr_end, passent, MASK_SHOT );
-		traceEnt = &g_entities[ tr.entityNum ];
+		TraceWeaponShot( tr, tr_start, tr_end, passent );
+		traceEnt = EntityFromTrace( tr );
 
 		// send bullet impact
 		if (  tr.surfaceFlags & SURF_NOIMPACT ) {
@@ -467,7 +487,7 @@ void weapon_railgun_fire( gentity_t *ent ) {
 	int			hits;
 	int			unlinked;
 	int			passent;
-	gentity_t	*unlinkedEntities[MAX_RAIL_HITS];
+	std::array<gentity_t *, MAX_RAIL_HITS> unlinkedEntities{};
 
 	damage = 100 * s_quadFactor;
 
@@ -481,11 +501,11 @@ void weapon_railgun_fire( gentity_t *ent ) {
 	hits = 0;
 	passent = ent->s.number;
 	do {
-		trap_Trace( &trace, muzzle_origin, NULL, NULL, end, passent, MASK_SHOT );
+		TraceWeaponShot( trace, muzzle_origin, end, passent );
 		if ( trace.entityNum >= ENTITYNUM_MAX_NORMAL ) {
 			break;
 		}
-		traceEnt = &g_entities[ trace.entityNum ];
+		traceEnt = EntityFromTrace( trace );
 		if ( traceEnt->takedamage ) {
 #ifdef MISSIONPACK
 			if ( traceEnt->client && traceEnt->client->invulnerabilityTime > level.time ) {
@@ -507,13 +527,13 @@ void weapon_railgun_fire( gentity_t *ent ) {
 					// the player can hit him/herself with the bounced rail
 					passent = ENTITYNUM_NONE;
 				}
-			} else
-#else
-			{
+			} else {
+#endif
 				if ( LogAccuracyHit( traceEnt, ent ) ) {
 					hits++;
 				}
 				G_Damage( traceEnt, ent, ent, forward, trace.endpos, damage, 0, MOD_RAILGUN );
+#ifdef MISSIONPACK
 			}
 #endif
 		}
@@ -601,9 +621,7 @@ void Weapon_GrapplingHook_Fire (gentity_t *ent)
 
 void Weapon_HookFree (gentity_t *ent)
 {
-	ent->parent->client->hook = NULL;
-	ent->parent->client->ps.pm_flags &= ~PMF_GRAPPLE_PULL;
-	G_FreeEntity( ent );
+	ReleaseGrappleHook( *ent );
 }
 
 
@@ -649,13 +667,7 @@ void Weapon_LightningFire( gentity_t *ent ) {
 	for (i = 0; i < 10; i++) {
 		VectorMA( muzzle_origin, LIGHTNING_RANGE, forward, end );
 
-		// unlagged
-		G_DoTimeShiftFor( ent );
-
-		trap_Trace( &tr, muzzle_origin, NULL, NULL, end, passent, MASK_SHOT );
-
-		// unlagged
-		G_UndoTimeShiftFor( ent );
+		TraceWeaponShotUnlagged( tr, *ent, muzzle_origin, end, passent );
 
 #ifdef MISSIONPACK
 		// if not the first trace (the lightning bounced of an invulnerability sphere)
@@ -673,7 +685,7 @@ void Weapon_LightningFire( gentity_t *ent ) {
 			return;
 		}
 
-		traceEnt = &g_entities[ tr.entityNum ];
+		traceEnt = EntityFromTrace( tr );
 
 		if ( traceEnt->takedamage ) {
 #ifdef MISSIONPACK

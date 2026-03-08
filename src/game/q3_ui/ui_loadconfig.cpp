@@ -10,6 +10,8 @@ LOAD CONFIG MENU
 
 #include "ui_local.h"
 
+#include <array>
+
 
 #define ART_BACK0			"menu/art/back_0"
 #define ART_BACK1			"menu/art/back_1"	
@@ -49,11 +51,36 @@ typedef struct {
 	menubitmap_s	back;
 	menubitmap_s	go;
 
-	char			names[NAMEBUFSIZE];
-	char*			configlist[MAX_CONFIGS];
+	std::array<char, NAMEBUFSIZE> names;
+	std::array<const char *, MAX_CONFIGS> configlist;
 } configs_t;
 
 static configs_t	s_configs;
+
+static void SetEmptyConfigList( void ) {
+	Q_strncpyz( s_configs.names.data(), "No Files Found.", static_cast<int>( s_configs.names.size() ) );
+	s_configs.list.numitems = 1;
+	s_configs.go.generic.flags |= ( QMF_INACTIVE | QMF_HIDDEN );
+}
+
+static void NormalizeConfigName( char *configName ) {
+	const int len = static_cast<int>( strlen( configName ) );
+	if ( len >= 4 && !Q_stricmp( configName + len - 4, ".cfg" ) ) {
+		configName[len - 4] = '\0';
+	}
+
+	Q_strupr( configName );
+}
+
+static void BuildConfigNameList( void ) {
+	char *configName = s_configs.names.data();
+	for ( int i = 0; i < s_configs.list.numitems; i++ ) {
+		const int len = static_cast<int>( strlen( configName ) );
+		s_configs.configlist[i] = configName;
+		NormalizeConfigName( configName );
+		configName += len + 1;
+	}
+}
 
 
 /*
@@ -93,13 +120,9 @@ LoadConfig_MenuInit
 ===============
 */
 static void LoadConfig_MenuInit( void ) {
-	int		i;
-	int		len;
-	char	*configname;
-
 	UI_LoadConfig_Cache();
 
-	memset( &s_configs, 0 ,sizeof(configs_t) );
+	s_configs = {};
 	s_configs.menu.wrapAround = qtrue;
 	s_configs.menu.fullscreen = qtrue;
 
@@ -185,33 +208,18 @@ static void LoadConfig_MenuInit( void ) {
 	s_configs.list.generic.y		= 130;
 	s_configs.list.width			= 16;
 	s_configs.list.height			= 14;
-	s_configs.list.numitems			= trap_FS_GetFileList( "", "cfg", s_configs.names, NAMEBUFSIZE );
-	s_configs.list.itemnames		= (const char **)s_configs.configlist;
+	s_configs.list.numitems			= trap_FS_GetFileList( "", "cfg", s_configs.names.data(), static_cast<int>( s_configs.names.size() ) );
+	s_configs.list.itemnames		= s_configs.configlist.data();
 	s_configs.list.columns			= 3;
 
-	if (!s_configs.list.numitems) {
-		strcpy(s_configs.names,"No Files Found.");
-		s_configs.list.numitems = 1;
-
-		//degenerate case, not selectable
-		s_configs.go.generic.flags |= (QMF_INACTIVE|QMF_HIDDEN);
+	if ( !s_configs.list.numitems ) {
+		SetEmptyConfigList();
 	}
-	else if (s_configs.list.numitems > MAX_CONFIGS)
+	else if ( s_configs.list.numitems > MAX_CONFIGS ) {
 		s_configs.list.numitems = MAX_CONFIGS;
-	
-	configname = s_configs.names;
-	for ( i = 0; i < s_configs.list.numitems; i++ ) {
-		s_configs.list.itemnames[i] = configname;
-		
-		// strip extension
-		len = strlen( configname );
-		if (!Q_stricmp(configname +  len - 4,".cfg"))
-			configname[len-4] = '\0';
-
-		Q_strupr(configname);
-
-		configname += len + 1;
 	}
+
+	BuildConfigNameList();
 
 	Menu_AddItem( &s_configs.menu, &s_configs.banner );
 	Menu_AddItem( &s_configs.menu, &s_configs.framel );
@@ -251,4 +259,3 @@ void UI_LoadConfigMenu( void ) {
 	LoadConfig_MenuInit();
 	UI_PushMenu( &s_configs.menu );
 }
-

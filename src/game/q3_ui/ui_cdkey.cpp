@@ -11,6 +11,8 @@ CD KEY MENU
 
 #include "ui_local.h"
 
+#include <string_view>
+
 
 #define ART_FRAME		"menu/art/cut_frame"
 #define ART_ACCEPT0		"menu/art/accept_0"
@@ -36,6 +38,36 @@ typedef struct {
 } cdkeyMenuInfo_t;
 
 static cdkeyMenuInfo_t	cdkeyMenuInfo;
+
+namespace {
+
+constexpr std::size_t CDKeyLength = 16;
+
+constexpr bool IsAllowedCDKeyCharacter( const char ch ) {
+	switch( ch ) {
+	case '2':
+	case '3':
+	case '7':
+	case 'a':
+	case 'b':
+	case 'c':
+	case 'd':
+	case 'g':
+	case 'h':
+	case 'j':
+	case 'l':
+	case 'p':
+	case 'r':
+	case 's':
+	case 't':
+	case 'w':
+		return true;
+	default:
+		return false;
+	}
+}
+
+}
 
 
 /*
@@ -69,32 +101,14 @@ UI_CDKeyMenu_PreValidateKey
 =================
 */
 static int UI_CDKeyMenu_PreValidateKey( const char *key ) {
-	char	ch;
+	const std::string_view keyView{ key };
 
-	if( strlen( key ) != 16 ) {
+	if( keyView.size() != CDKeyLength ) {
 		return 1;
 	}
 
-	while( ( ch = *key++ ) ) {
-		switch( ch ) {
-		case '2':
-		case '3':
-		case '7':
-		case 'a':
-		case 'b':
-		case 'c':
-		case 'd':
-		case 'g':
-		case 'h':
-		case 'j':
-		case 'l':
-		case 'p':
-		case 'r':
-		case 's':
-		case 't':
-		case 'w':
-			continue;
-		default:
+	for( const char ch : keyView ) {
+		if( !IsAllowedCDKeyCharacter( ch ) ) {
 			return -1;
 		}
 	}
@@ -171,7 +185,7 @@ static void UI_CDKeyMenu_Init( void ) {
 
 	UI_CDKeyMenu_Cache();
 
-	memset( &cdkeyMenuInfo, 0, sizeof(cdkeyMenuInfo) );
+	cdkeyMenuInfo = {};
 	cdkeyMenuInfo.menu.wrapAround = qtrue;
 	cdkeyMenuInfo.menu.fullscreen = qtrue;
 
@@ -230,7 +244,7 @@ static void UI_CDKeyMenu_Init( void ) {
 	}
 
 	trap_GetCDKey( cdkeyMenuInfo.cdkey.field.buffer, cdkeyMenuInfo.cdkey.field.maxchars + 1 );
-	if( trap_VerifyCDKey( cdkeyMenuInfo.cdkey.field.buffer, NULL ) == qfalse ) {
+	if( trap_VerifyCDKey( cdkeyMenuInfo.cdkey.field.buffer, nullptr ) == qfalse ) {
 		cdkeyMenuInfo.cdkey.field.buffer[0] = 0;
 	}
 }

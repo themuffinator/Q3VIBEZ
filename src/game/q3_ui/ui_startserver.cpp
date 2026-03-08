@@ -11,6 +11,8 @@ START SERVER MENU *****
 
 #include "ui_local.h"
 
+#include <array>
+
 
 #define GAMESERVER_BACK0		"menu/art/back_0"
 #define GAMESERVER_BACK1		"menu/art/back_1"
@@ -68,6 +70,27 @@ typedef struct {
 } startserver_t;
 
 static startserver_t s_startserver;
+
+namespace {
+
+auto StartServerPicNames() -> std::array<std::array<char, MAX_QPATH>, MAX_MAPSPERPAGE> & {
+	static std::array<std::array<char, MAX_QPATH>, MAX_MAPSPERPAGE> picNames{};
+	return picNames;
+}
+
+void BuildLevelshotPath( std::array<char, MAX_QPATH> &picName, const char *mapName ) {
+	Com_sprintf( picName.data(), static_cast<int>( picName.size() ), "levelshots/%s", mapName );
+}
+
+void ResetMapSelectionEntry( const int index ) {
+	s_startserver.mappics[index].generic.flags &= ~QMF_HIGHLIGHT;
+	s_startserver.mappics[index].generic.name = nullptr;
+	s_startserver.mappics[index].shader = 0;
+	s_startserver.mapbuttons[index].generic.flags &= ~QMF_PULSEIFFOCUS;
+	s_startserver.mapbuttons[index].generic.flags |= QMF_INACTIVE;
+}
+
+} // namespace
 
 static const char *gametype_items[] = {
 	"Free For All",
@@ -142,9 +165,9 @@ StartServer_Update
 static void StartServer_Update( void ) {
 	int				i;
 	int				top;
-	static	char	picname[MAX_MAPSPERPAGE][MAX_QPATH];
+	auto &picNames = StartServerPicNames();
 	const char		*info;
-	char			mapname[MAX_NAMELENGTH];
+	std::array<char, MAX_NAMELENGTH> mapname{};
 
 	top = s_startserver.page*MAX_MAPSPERPAGE;
 
@@ -154,13 +177,13 @@ static void StartServer_Update( void ) {
 			break;
 
 		info = UI_GetArenaInfoByNumber( s_startserver.maplist[ top + i ]);
-		Q_strncpyz( mapname, Info_ValueForKey( info, "map"), MAX_NAMELENGTH );
-		Q_strupr( mapname );
+		Q_strncpyz( mapname.data(), Info_ValueForKey( info, "map"), static_cast<int>( mapname.size() ) );
+		Q_strupr( mapname.data() );
 
-		Com_sprintf( picname[i], sizeof(picname[i]), "levelshots/%s", mapname );
+		BuildLevelshotPath( picNames[i], mapname.data() );
 
 		s_startserver.mappics[i].generic.flags &= ~QMF_HIGHLIGHT;
-		s_startserver.mappics[i].generic.name   = picname[i];
+		s_startserver.mappics[i].generic.name   = picNames[i].data();
 		s_startserver.mappics[i].shader         = 0;
 
 		// reset
@@ -170,13 +193,7 @@ static void StartServer_Update( void ) {
 
 	for (; i<MAX_MAPSPERPAGE; i++)
 	{
-		s_startserver.mappics[i].generic.flags &= ~QMF_HIGHLIGHT;
-		s_startserver.mappics[i].generic.name   = NULL;
-		s_startserver.mappics[i].shader         = 0;
-
-		// disable
-		s_startserver.mapbuttons[i].generic.flags &= ~QMF_PULSEIFFOCUS;
-		s_startserver.mapbuttons[i].generic.flags |= QMF_INACTIVE;
+		ResetMapSelectionEntry( i );
 	}
 
 
@@ -368,10 +385,10 @@ static void StartServer_MenuInit( void ) {
 	int	i;
 	int	x;
 	int	y;
-	static char mapnamebuffer[64];
+	static std::array<char, 64> mapnamebuffer{};
 
 	// zero set all our globals
-	memset( &s_startserver, 0 ,sizeof(startserver_t) );
+	s_startserver = startserver_t{};
 
 	StartServer_Cache();
 
@@ -473,7 +490,7 @@ static void StartServer_MenuInit( void ) {
 	s_startserver.mapname.generic.flags = QMF_CENTER_JUSTIFY|QMF_INACTIVE;
 	s_startserver.mapname.generic.x	    = 320;
 	s_startserver.mapname.generic.y	    = 440;
-	s_startserver.mapname.string        = mapnamebuffer;
+	s_startserver.mapname.string        = mapnamebuffer.data();
 	s_startserver.mapname.style         = UI_CENTER|UI_BIGFONT;
 	s_startserver.mapname.color         = text_color_normal;
 
@@ -525,7 +542,7 @@ static void StartServer_MenuInit( void ) {
 	Menu_AddItem( &s_startserver.menu, &s_startserver.mapname );
 	Menu_AddItem( &s_startserver.menu, &s_startserver.item_null );
 
-	StartServer_GametypeEvent( NULL, QM_ACTIVATED );
+	StartServer_GametypeEvent( nullptr, QM_ACTIVATED );
 }
 
 

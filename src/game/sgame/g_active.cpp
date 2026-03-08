@@ -3,6 +3,112 @@
 
 #include "g_local.h"
 
+#include <array>
+
+namespace {
+
+bool HasTouchedEntity( const pmove_t &pm, const int touch_index ) {
+	for ( int previous_index = 0; previous_index < touch_index; ++previous_index ) {
+		if ( pm.touchents[previous_index] == pm.touchents[touch_index] ) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+int SpectatorTraceMask( const gclient_t &client ) {
+	if ( client.noclip ) {
+		return 0;
+	}
+
+	return MASK_PLAYERSOLID & ~CONTENTS_BODY;
+}
+
+void ConfigureSpectatorPmove( pmove_t &pm, gclient_t &client, const usercmd_t &usercmd ) {
+	pm.ps = &client.ps;
+	pm.cmd = usercmd;
+	pm.tracemask = SpectatorTraceMask( client );
+	pm.trace = trap_Trace;
+	pm.pointcontents = trap_PointContents;
+}
+
+void ApplyRegenerationHealth( gentity_t &entity, const int max_health ) {
+	if ( entity.health < max_health ) {
+		entity.health += 15;
+		if ( entity.health > max_health * 1.1 ) {
+			entity.health = max_health * 1.1;
+		}
+		G_AddEvent( &entity, EV_POWERUP_REGEN, 0 );
+		return;
+	}
+
+	if ( entity.health < max_health * 2 ) {
+		entity.health += 5;
+		if ( entity.health > max_health * 2 ) {
+			entity.health = max_health * 2;
+		}
+		G_AddEvent( &entity, EV_POWERUP_REGEN, 0 );
+	}
+}
+
+#ifdef MISSIONPACK
+int MaxRegenerationHealth( const gclient_t &client ) {
+	if ( bg_itemlist[client.ps.stats[STAT_PERSISTANT_POWERUP]].giTag == PW_GUARD ) {
+		return client.ps.stats[STAT_MAX_HEALTH] / 2;
+	}
+
+	if ( client.ps.powerups[PW_REGEN] ) {
+		return client.ps.stats[STAT_MAX_HEALTH];
+	}
+
+	return 0;
+}
+
+struct AmmoRegenSpec {
+	int weapon;
+	int max_ammo;
+	int increment;
+	int interval_ms;
+};
+
+constexpr std::array<AmmoRegenSpec, 11> kAmmoRegenSpecs{{
+	{ WP_MACHINEGUN, 50, 4, 1000 },
+	{ WP_SHOTGUN, 10, 1, 1500 },
+	{ WP_GRENADE_LAUNCHER, 10, 1, 2000 },
+	{ WP_ROCKET_LAUNCHER, 10, 1, 1750 },
+	{ WP_LIGHTNING, 50, 5, 1500 },
+	{ WP_RAILGUN, 10, 1, 1750 },
+	{ WP_PLASMAGUN, 50, 5, 1500 },
+	{ WP_BFG, 10, 1, 4000 },
+	{ WP_NAILGUN, 10, 1, 1250 },
+	{ WP_PROX_LAUNCHER, 5, 1, 2000 },
+	{ WP_CHAINGUN, 100, 5, 1000 },
+}};
+
+void RegenerateAmmoForWeapon( gclient_t &client, const AmmoRegenSpec &spec, const int msec ) {
+	client.ammoTimes[spec.weapon] += msec;
+	if ( client.ps.ammo[spec.weapon] >= spec.max_ammo ) {
+		client.ammoTimes[spec.weapon] = 0;
+	}
+
+	if ( client.ammoTimes[spec.weapon] < spec.interval_ms ) {
+		return;
+	}
+
+	while ( client.ammoTimes[spec.weapon] >= spec.interval_ms ) {
+		client.ammoTimes[spec.weapon] -= spec.interval_ms;
+	}
+
+	client.ps.ammo[spec.weapon] += spec.increment;
+	if ( client.ps.ammo[spec.weapon] > spec.max_ammo ) {
+		client.ps.ammo[spec.weapon] = spec.max_ammo;
+	}
+}
+
+#endif
+
+} // namespace
 
 /*
 ===============
@@ -176,21 +282,13 @@ ClientImpacts
 ==============
 */
 void ClientImpacts( gentity_t *ent, pmove_t *pm ) {
-	int		i, j;
-	trace_t	trace;
-	gentity_t	*other;
+	trace_t trace{};
 
-	memset( &trace, 0, sizeof( trace ) );
-	for (i=0 ; i<pm->numtouch ; i++) {
-		for (j=0 ; j<i ; j++) {
-			if (pm->touchents[j] == pm->touchents[i] ) {
-				break;
-			}
-		}
-		if (j != i) {
+	for ( int touch_index = 0; touch_index < pm->numtouch; ++touch_index ) {
+		if ( HasTouchedEntity( *pm, touch_index ) ) {
 			continue;	// duplicated
 		}
-		other = &g_entities[ pm->touchents[i] ];
+		gentity_t *other = &g_entities[pm->touchents[touch_index]];
 
 		if ( ( ent->r.svFlags & SVF_BOT ) && ( ent->touch ) ) {
 			ent->touch( ent, other, &trace );
@@ -215,9 +313,9 @@ Spectators will only interact with teleporters.
 */
 void	G_TouchTriggers( gentity_t *ent ) {
 	int			i, num;
-	int			touch[MAX_GENTITIES];
+	std::array<int, MAX_GENTITIES> touch{};
 	gentity_t	*hit;
-	trace_t		trace;
+	trace_t		trace{};
 	vec3_t		mins, maxs;
 	static vec3_t	range = { 40, 40, 52 };
 
@@ -233,7 +331,7 @@ void	G_TouchTriggers( gentity_t *ent ) {
 	VectorSubtract( ent->client->ps.origin, range, mins );
 	VectorAdd( ent->client->ps.origin, range, maxs );
 
-	num = trap_EntitiesInBox( mins, maxs, touch, MAX_GENTITIES );
+	num = trap_EntitiesInBox( mins, maxs, touch.data(), MAX_GENTITIES );
 
 	// can't use ent->absmin, because that has a one unit pad
 	VectorAdd( ent->client->ps.origin, ent->r.mins, mins );
@@ -271,8 +369,6 @@ void	G_TouchTriggers( gentity_t *ent ) {
 			}
 		}
 
-		memset( &trace, 0, sizeof(trace) );
-
 		if ( hit->touch ) {
 			hit->touch (hit, ent, &trace);
 		}
@@ -295,7 +391,7 @@ SpectatorThink
 =================
 */
 void SpectatorThink( gentity_t *ent, usercmd_t *ucmd ) {
-	pmove_t	pm;
+	pmove_t	pm{};
 	gclient_t	*client;
 
 	client = ent->client;
@@ -305,15 +401,7 @@ void SpectatorThink( gentity_t *ent, usercmd_t *ucmd ) {
 		client->ps.speed = g_speed.value * 1.25f; // faster than normal
 
 		// set up for pmove
-		memset( &pm, 0, sizeof( pm ) );
-		pm.ps = &client->ps;
-		pm.cmd = *ucmd;
-		if ( client->noclip )
-			pm.tracemask = 0;
-		else
-			pm.tracemask = MASK_PLAYERSOLID & ~CONTENTS_BODY;	// spectators can fly through bodies
-		pm.trace = trap_Trace;
-		pm.pointcontents = trap_PointContents;
+		ConfigureSpectatorPmove( pm, *client, *ucmd );
 
 		// perform a pmove
 		Pmove( &pm );
@@ -376,9 +464,6 @@ Actions that happen once a second
 */
 void ClientTimerActions( gentity_t *ent, int msec ) {
 	gclient_t	*client;
-#ifdef MISSIONPACK
-	int			maxHealth;
-#endif
 
 	client = ent->client;
 	client->timeResidual += msec;
@@ -388,44 +473,12 @@ void ClientTimerActions( gentity_t *ent, int msec ) {
 
 		// regenerate
 #ifdef MISSIONPACK
-		if( bg_itemlist[client->ps.stats[STAT_PERSISTANT_POWERUP]].giTag == PW_GUARD ) {
-			maxHealth = client->ps.stats[STAT_MAX_HEALTH] / 2;
-		}
-		else if ( client->ps.powerups[PW_REGEN] ) {
-			maxHealth = client->ps.stats[STAT_MAX_HEALTH];
-		}
-		else {
-			maxHealth = 0;
-		}
+		const int maxHealth = MaxRegenerationHealth( *client );
 		if( maxHealth ) {
-			if ( ent->health < maxHealth ) {
-				ent->health += 15;
-				if ( ent->health > maxHealth * 1.1 ) {
-					ent->health = maxHealth * 1.1;
-				}
-				G_AddEvent( ent, EV_POWERUP_REGEN, 0 );
-			} else if ( ent->health < maxHealth * 2) {
-				ent->health += 5;
-				if ( ent->health > maxHealth * 2 ) {
-					ent->health = maxHealth * 2;
-				}
-				G_AddEvent( ent, EV_POWERUP_REGEN, 0 );
-			}
+			ApplyRegenerationHealth( *ent, maxHealth );
 #else
 		if ( client->ps.powerups[PW_REGEN] ) {
-			if ( ent->health < client->ps.stats[STAT_MAX_HEALTH]) {
-				ent->health += 15;
-				if ( ent->health > client->ps.stats[STAT_MAX_HEALTH] * 1.1 ) {
-					ent->health = client->ps.stats[STAT_MAX_HEALTH] * 1.1;
-				}
-				G_AddEvent( ent, EV_POWERUP_REGEN, 0 );
-			} else if ( ent->health < client->ps.stats[STAT_MAX_HEALTH] * 2) {
-				ent->health += 5;
-				if ( ent->health > client->ps.stats[STAT_MAX_HEALTH] * 2 ) {
-					ent->health = client->ps.stats[STAT_MAX_HEALTH] * 2;
-				}
-				G_AddEvent( ent, EV_POWERUP_REGEN, 0 );
-			}
+			ApplyRegenerationHealth( *ent, client->ps.stats[STAT_MAX_HEALTH] );
 #endif
 		} else {
 			// count down health when over max
@@ -441,40 +494,9 @@ void ClientTimerActions( gentity_t *ent, int msec ) {
 	}
 #ifdef MISSIONPACK
 	if( bg_itemlist[client->ps.stats[STAT_PERSISTANT_POWERUP]].giTag == PW_AMMOREGEN ) {
-		int w, max, inc, t, i;
-    int weapList[]={WP_MACHINEGUN,WP_SHOTGUN,WP_GRENADE_LAUNCHER,WP_ROCKET_LAUNCHER,WP_LIGHTNING,WP_RAILGUN,WP_PLASMAGUN,WP_BFG,WP_NAILGUN,WP_PROX_LAUNCHER,WP_CHAINGUN};
-    int weapCount = ARRAY_LEN( weapList );
-		//
-    for (i = 0; i < weapCount; i++) {
-		  w = weapList[i];
-
-		  switch(w) {
-			  case WP_MACHINEGUN: max = 50; inc = 4; t = 1000; break;
-			  case WP_SHOTGUN: max = 10; inc = 1; t = 1500; break;
-			  case WP_GRENADE_LAUNCHER: max = 10; inc = 1; t = 2000; break;
-			  case WP_ROCKET_LAUNCHER: max = 10; inc = 1; t = 1750; break;
-			  case WP_LIGHTNING: max = 50; inc = 5; t = 1500; break;
-			  case WP_RAILGUN: max = 10; inc = 1; t = 1750; break;
-			  case WP_PLASMAGUN: max = 50; inc = 5; t = 1500; break;
-			  case WP_BFG: max = 10; inc = 1; t = 4000; break;
-			  case WP_NAILGUN: max = 10; inc = 1; t = 1250; break;
-			  case WP_PROX_LAUNCHER: max = 5; inc = 1; t = 2000; break;
-			  case WP_CHAINGUN: max = 100; inc = 5; t = 1000; break;
-			  default: max = 0; inc = 0; t = 1000; break;
-		  }
-		  client->ammoTimes[w] += msec;
-		  if ( client->ps.ammo[w] >= max ) {
-			  client->ammoTimes[w] = 0;
-		  }
-		  if ( client->ammoTimes[w] >= t ) {
-			  while ( client->ammoTimes[w] >= t )
-				  client->ammoTimes[w] -= t;
-			  client->ps.ammo[w] += inc;
-			  if ( client->ps.ammo[w] > max ) {
-				  client->ps.ammo[w] = max;
-			  }
-		  }
-    }
+		for ( const AmmoRegenSpec &spec : kAmmoRegenSpecs ) {
+			RegenerateAmmoForWeapon( *client, spec, msec );
+		}
 	}
 #endif
 }
@@ -729,7 +751,7 @@ once for each server frame, which makes for smooth demo recording.
 */
 void ClientThink_real( gentity_t *ent ) {
 	gclient_t	*client;
-	pmove_t		pm;
+	pmove_t		pm{};
 	int			oldEventSequence;
 	int			msec;
 	usercmd_t	*ucmd;
@@ -840,8 +862,6 @@ void ClientThink_real( gentity_t *ent ) {
 
 	// set up for pmove
 	oldEventSequence = client->ps.eventSequence;
-
-	memset (&pm, 0, sizeof(pm));
 
 	// check for the hit-scan gauntlet, don't let the action
 	// go through as an attack unless it actually hits something

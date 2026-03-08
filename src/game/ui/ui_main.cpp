@@ -13,6 +13,8 @@ USER INTERFACE MAIN
 
 #include "ui_local.h"
 
+#include <array>
+
 uiInfo_t uiInfo;
 
 static const char *MonthAbbrev[] = {
@@ -5384,12 +5386,15 @@ void Text_PaintCenter_AutoWrapped(float x, float y, float xmax, float ystep, flo
 }
 
 static void UI_DisplayDownloadInfo( const char *downloadName, float centerPoint, float yStart, float scale ) {
-	static char dlText[]	= "Downloading:";
-	static char etaText[]	= "Estimated time left:";
-	static char xferText[]	= "Transfer rate:";
+	static constexpr char dlText[]	= "Downloading:";
+	static constexpr char etaText[]	= "Estimated time left:";
+	static constexpr char xferText[]	= "Transfer rate:";
 
 	int downloadSize, downloadCount, downloadTime;
-	char dlSizeBuf[64], totalSizeBuf[64], xferRateBuf[64], dlTimeBuf[64];
+	std::array<char, 64> dlSizeBuf{};
+	std::array<char, 64> totalSizeBuf{};
+	std::array<char, 64> xferRateBuf{};
+	std::array<char, 64> dlTimeBuf{};
 	int xferRate;
 	int leftWidth;
 	const char *s;
@@ -5413,41 +5418,41 @@ static void UI_DisplayDownloadInfo( const char *downloadName, float centerPoint,
 
 	Text_PaintCenter(centerPoint, yStart+136, scale, colorWhite, s, 0);
 
-	UI_ReadableSize( dlSizeBuf,		sizeof dlSizeBuf,		downloadCount );
-	UI_ReadableSize( totalSizeBuf,	sizeof totalSizeBuf,	downloadSize );
+	UI_ReadableSize( dlSizeBuf.data(), static_cast<int>( dlSizeBuf.size() ), downloadCount );
+	UI_ReadableSize( totalSizeBuf.data(), static_cast<int>( totalSizeBuf.size() ), downloadSize );
 
 	if (downloadCount < 4096 || !downloadTime) {
 		Text_PaintCenter(leftWidth, yStart+216, scale, colorWhite, "estimating", 0);
-		Text_PaintCenter(leftWidth, yStart+160, scale, colorWhite, va("(%s of %s copied)", dlSizeBuf, totalSizeBuf), 0);
+		Text_PaintCenter(leftWidth, yStart+160, scale, colorWhite, va("(%s of %s copied)", dlSizeBuf.data(), totalSizeBuf.data()), 0);
 	} else {
 		if ((uiInfo.uiDC.realTime - downloadTime) / 1000) {
 			xferRate = downloadCount / ((uiInfo.uiDC.realTime - downloadTime) / 1000);
 		} else {
 			xferRate = 0;
 		}
-		UI_ReadableSize( xferRateBuf, sizeof xferRateBuf, xferRate );
+		UI_ReadableSize( xferRateBuf.data(), static_cast<int>( xferRateBuf.size() ), xferRate );
 
 		// Extrapolate estimated completion time
 		if (downloadSize && xferRate) {
 			int n = downloadSize / xferRate; // estimated time for entire d/l in secs
 
 			// We do it in K (/1024) because we'd overflow around 4MB
-			UI_PrintTime ( dlTimeBuf, sizeof dlTimeBuf, 
+			UI_PrintTime ( dlTimeBuf.data(), static_cast<int>( dlTimeBuf.size() ), 
 				(n - (((downloadCount/1024) * n) / (downloadSize/1024))) * 1000);
 
-			Text_PaintCenter(leftWidth, yStart+216, scale, colorWhite, dlTimeBuf, 0);
-			Text_PaintCenter(leftWidth, yStart+160, scale, colorWhite, va("(%s of %s copied)", dlSizeBuf, totalSizeBuf), 0);
+			Text_PaintCenter(leftWidth, yStart+216, scale, colorWhite, dlTimeBuf.data(), 0);
+			Text_PaintCenter(leftWidth, yStart+160, scale, colorWhite, va("(%s of %s copied)", dlSizeBuf.data(), totalSizeBuf.data()), 0);
 		} else {
 			Text_PaintCenter(leftWidth, yStart+216, scale, colorWhite, "estimating", 0);
 			if (downloadSize) {
-				Text_PaintCenter(leftWidth, yStart+160, scale, colorWhite, va("(%s of %s copied)", dlSizeBuf, totalSizeBuf), 0);
+				Text_PaintCenter(leftWidth, yStart+160, scale, colorWhite, va("(%s of %s copied)", dlSizeBuf.data(), totalSizeBuf.data()), 0);
 			} else {
-				Text_PaintCenter(leftWidth, yStart+160, scale, colorWhite, va("(%s copied)", dlSizeBuf), 0);
+				Text_PaintCenter(leftWidth, yStart+160, scale, colorWhite, va("(%s copied)", dlSizeBuf.data()), 0);
 			}
 		}
 
 		if (xferRate) {
-			Text_PaintCenter(leftWidth, yStart+272, scale, colorWhite, va("%s/Sec", xferRateBuf), 0);
+			Text_PaintCenter(leftWidth, yStart+272, scale, colorWhite, va("%s/Sec", xferRateBuf.data()), 0);
 		}
 	}
 }
@@ -5463,8 +5468,7 @@ to prevent it from blinking away too rapidly on local or lan games.
 void UI_DrawConnectScreen( qboolean overlay ) {
 	char			*s;
 	uiClientState_t	cstate;
-	char			info[MAX_INFO_VALUE];
-	char text[256];
+	std::array<char, MAX_INFO_VALUE> info{};
 	float centerPoint, yStart, scale;
 	
 	menuDef_t *menu = Menus_FindByName("Connect");
@@ -5489,15 +5493,14 @@ void UI_DrawConnectScreen( qboolean overlay ) {
 	trap_GetClientState( &cstate );
 
 	info[0] = '\0';
-	if( trap_GetConfigString( CS_SERVERINFO, info, sizeof(info) ) ) {
-		Text_PaintCenter(centerPoint, yStart, scale, colorWhite, va( "Loading %s", Info_ValueForKey( info, "mapname" )), 0);
+	if( trap_GetConfigString( CS_SERVERINFO, info.data(), static_cast<int>( info.size() ) ) ) {
+		Text_PaintCenter(centerPoint, yStart, scale, colorWhite, va( "Loading %s", Info_ValueForKey( info.data(), "mapname" )), 0);
 	}
 
 	if (!Q_stricmp(cstate.servername,"localhost")) {
 		Text_PaintCenter(centerPoint, yStart + 48, scale, colorWhite, va("Starting up..."), ITEM_TEXTSTYLE_SHADOWEDMORE);
 	} else {
-		strcpy(text, va("Connecting to %s", cstate.servername));
-		Text_PaintCenter(centerPoint, yStart + 48, scale, colorWhite,text , ITEM_TEXTSTYLE_SHADOWEDMORE);
+		Text_PaintCenter(centerPoint, yStart + 48, scale, colorWhite, va("Connecting to %s", cstate.servername), ITEM_TEXTSTYLE_SHADOWEDMORE);
 	}
 
 	// display global MOTD at bottom
@@ -5520,11 +5523,11 @@ void UI_DrawConnectScreen( qboolean overlay ) {
 		s = va("Awaiting challenge...%i", cstate.connectPacketCount);
 		break;
 	case CA_CONNECTED: {
-		char downloadName[MAX_INFO_VALUE];
+		std::array<char, MAX_INFO_VALUE> downloadName{};
 
-			trap_Cvar_VariableStringBuffer( "cl_downloadName", downloadName, sizeof(downloadName) );
-			if (*downloadName) {
-				UI_DisplayDownloadInfo( downloadName, centerPoint, yStart, scale );
+			trap_Cvar_VariableStringBuffer( "cl_downloadName", downloadName.data(), static_cast<int>( downloadName.size() ) );
+			if ( downloadName.front() != '\0' ) {
+				UI_DisplayDownloadInfo( downloadName.data(), centerPoint, yStart, scale );
 				return;
 			}
 		}
@@ -5745,4 +5748,3 @@ static void UI_StartServerRefresh(qboolean full)
 		}
 	}
 }
-

@@ -48,14 +48,19 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
 #include <ctype.h>
 #include <limits.h>
+#ifdef __cplusplus
+#include <bit>
+#include <type_traits>
+#endif
 
 #ifndef _WIN32
-#include <stdint.h>
 #ifdef __cplusplus
 #define DLLEXPORT extern "C" __attribute__((visibility ("default")))
 #else
@@ -125,9 +130,29 @@
 
 //=============================================================
 
+#ifdef Q3_VM
 typedef unsigned char 		byte;
-
 typedef int qboolean;
+typedef int		qhandle_t;
+typedef int		sfxHandle_t;
+typedef int		fileHandle_t;
+typedef int		clipHandle_t;
+#elif defined(__cplusplus)
+using byte = uint8_t;
+using qboolean = int32_t;
+using qhandle_t = int32_t;
+using sfxHandle_t = int32_t;
+using fileHandle_t = int32_t;
+using clipHandle_t = int32_t;
+#else
+typedef uint8_t			byte;
+typedef int32_t			qboolean;
+typedef int32_t			qhandle_t;
+typedef int32_t			sfxHandle_t;
+typedef int32_t			fileHandle_t;
+typedef int32_t			clipHandle_t;
+#endif
+
 enum { qfalse = 0, qtrue = 1 };
 
 #ifdef __cplusplus
@@ -147,12 +172,38 @@ struct q_alloc_ptr_t {
 constexpr inline q_alloc_ptr_t Q_AllocPtr( void *ptr ) noexcept {
 	return { ptr };
 }
-#endif
 
-typedef int		qhandle_t;
-typedef int		sfxHandle_t;
-typedef int		fileHandle_t;
-typedef int		clipHandle_t;
+constexpr inline qboolean Q_FromBool( bool value ) noexcept {
+	return value ? qtrue : qfalse;
+}
+
+constexpr inline bool Q_ToBool( qboolean value ) noexcept {
+	return value != qfalse;
+}
+
+#if !defined(Q3_VM)
+constexpr inline int32_t Q_FloatAsInt( float value ) noexcept {
+	return std::bit_cast<int32_t>( value );
+}
+
+constexpr inline uint32_t Q_FloatAsUint( float value ) noexcept {
+	return std::bit_cast<uint32_t>( value );
+}
+
+constexpr inline float Q_IntAsFloat( int32_t value ) noexcept {
+	return std::bit_cast<float>( value );
+}
+
+static_assert( sizeof( byte ) == 1, "byte must remain 8-bit" );
+static_assert( sizeof( qboolean ) == 4, "qboolean must remain 32-bit" );
+static_assert( sizeof( qhandle_t ) == 4, "qhandle_t must remain 32-bit" );
+static_assert( sizeof( sfxHandle_t ) == 4, "sfxHandle_t must remain 32-bit" );
+static_assert( sizeof( fileHandle_t ) == 4, "fileHandle_t must remain 32-bit" );
+static_assert( sizeof( clipHandle_t ) == 4, "clipHandle_t must remain 32-bit" );
+static_assert( sizeof( intptr_t ) == sizeof( void * ), "intptr_t must remain pointer-sized" );
+static_assert( std::is_integral_v<qboolean>, "qboolean must remain an integral ABI type" );
+#endif
+#endif
 
 
 #ifndef NULL
@@ -395,7 +446,11 @@ extern	vec3_t	axisDefault[3];
 
 #define	nanmask (255<<23)
 
-#define	IS_NAN(x) (((*(int *)&x)&nanmask)==nanmask)
+#if defined(__cplusplus) && !defined(Q3_VM)
+#define	IS_NAN(x) ((Q_FloatAsUint((x)) & nanmask) == nanmask)
+#else
+#define	IS_NAN(x) (((*(int *)&(x))&nanmask)==nanmask)
+#endif
 
 float Q_fabs( float f );
 float Q_rsqrt( float f );		// reciprocal square root
@@ -733,7 +788,13 @@ default values.
 
 #define	MAX_CVAR_VALUE_STRING	256
 
+#ifdef Q3_VM
 typedef int	cvarHandle_t;
+#elif defined(__cplusplus)
+using cvarHandle_t = int32_t;
+#else
+typedef int32_t cvarHandle_t;
+#endif
 
 // the modules that run in the virtual machine can't access the cvar_t directly,
 // so they must ask for structured updates
@@ -744,6 +805,18 @@ typedef struct {
 	int			integer;
 	char		string[MAX_CVAR_VALUE_STRING];
 } vmCvar_t;
+
+#ifdef __cplusplus
+#if !defined(Q3_VM)
+static_assert( sizeof( cvarHandle_t ) == 4, "cvarHandle_t must remain 32-bit" );
+static_assert( offsetof( vmCvar_t, handle ) == 0, "vmCvar_t::handle ABI changed" );
+static_assert( offsetof( vmCvar_t, modificationCount ) == 4, "vmCvar_t::modificationCount ABI changed" );
+static_assert( offsetof( vmCvar_t, value ) == 8, "vmCvar_t::value ABI changed" );
+static_assert( offsetof( vmCvar_t, integer ) == 12, "vmCvar_t::integer ABI changed" );
+static_assert( offsetof( vmCvar_t, string ) == 16, "vmCvar_t::string ABI changed" );
+static_assert( sizeof( vmCvar_t ) == 16 + MAX_CVAR_VALUE_STRING, "vmCvar_t ABI changed" );
+#endif
+#endif
 
 /*
 ==============================================================

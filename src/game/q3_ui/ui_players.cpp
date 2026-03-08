@@ -4,6 +4,9 @@
 
 #include "ui_local.h"
 
+#include <algorithm>
+#include <array>
+
 
 #define UI_TIMER_GESTURE		2300
 #define UI_TIMER_JUMP			1000
@@ -23,6 +26,14 @@
 
 static int			dp_realtime;
 static float		jumpHeight;
+
+namespace {
+
+void SetOpaqueShaderColor( refEntity_t &entity ) {
+	std::fill_n( entity.shaderRGBA, sizeof( entity.shaderRGBA ), static_cast<byte>( 255 ) );
+}
+
+} // namespace
 
 
 /*
@@ -609,10 +620,8 @@ static void UI_PlayerAngles( playerInfo_t *pi, vec3_t legs[3], vec3_t torso[3], 
 UI_PlayerFloatSprite
 ===============
 */
-static void UI_PlayerFloatSprite( playerInfo_t *pi, vec3_t origin, qhandle_t shader ) {
-	refEntity_t		ent;
-
-	memset( &ent, 0, sizeof( ent ) );
+static void UI_PlayerFloatSprite( vec3_t origin, qhandle_t shader ) {
+	refEntity_t		ent{};
 	VectorCopy( origin, ent.origin );
 	ent.origin[2] += 48;
 	ent.reType = RT_SPRITE;
@@ -666,13 +675,13 @@ UI_DrawPlayer
 ===============
 */
 void UI_DrawPlayer( float x, float y, float w, float h, playerInfo_t *pi, int time ) {
-	refdef_t		refdef;
-	refEntity_t		legs;
-	refEntity_t		torso;
-	refEntity_t		head;
-	refEntity_t		gun;
-	refEntity_t		barrel;
-	refEntity_t		flash;
+	refdef_t		refdef{};
+	refEntity_t		legs{};
+	refEntity_t		torso{};
+	refEntity_t		head{};
+	refEntity_t		gun{};
+	refEntity_t		barrel{};
+	refEntity_t		flash{};
 	vec3_t			origin;
 	int				renderfx;
 	vec3_t			mins = {-16, -16, -24};
@@ -695,11 +704,6 @@ void UI_DrawPlayer( float x, float y, float w, float h, playerInfo_t *pi, int ti
 			trap_S_StartLocalSound( weaponChangeSound, CHAN_LOCAL );
 		}
 	}
-
-	memset( &refdef, 0, sizeof( refdef ) );
-	memset( &legs, 0, sizeof(legs) );
-	memset( &torso, 0, sizeof(torso) );
-	memset( &head, 0, sizeof(head) );
 
 	// calculate fov from virtual dimensions
 	// so it will be resolution-independent
@@ -745,8 +749,7 @@ void UI_DrawPlayer( float x, float y, float w, float h, playerInfo_t *pi, int ti
 	//
 	legs.hModel = pi->legsModel;
 	legs.customSkin = pi->legsSkin;
-	// for colored skins
-	memset( legs.shaderRGBA, 255, sizeof( legs.shaderRGBA ) );
+	SetOpaqueShaderColor( legs );
 
 	VectorCopy( origin, legs.origin );
 
@@ -769,8 +772,7 @@ void UI_DrawPlayer( float x, float y, float w, float h, playerInfo_t *pi, int ti
 	}
 
 	torso.customSkin = pi->torsoSkin;
-	// for colored skins
-	memset( torso.shaderRGBA, 255, sizeof( torso.shaderRGBA ) );
+	SetOpaqueShaderColor( torso );
 
 	VectorCopy( origin, torso.lightingOrigin );
 
@@ -788,8 +790,7 @@ void UI_DrawPlayer( float x, float y, float w, float h, playerInfo_t *pi, int ti
 		return;
 	}
 	head.customSkin = pi->headSkin;
-	// for colored skins
-	memset( head.shaderRGBA, 255, sizeof( head.shaderRGBA ) );
+	SetOpaqueShaderColor( head );
 
 	VectorCopy( origin, head.lightingOrigin );
 
@@ -803,7 +804,7 @@ void UI_DrawPlayer( float x, float y, float w, float h, playerInfo_t *pi, int ti
 	// add the gun
 	//
 	if ( pi->currentWeapon != WP_NONE ) {
-		memset( &gun, 0, sizeof(gun) );
+		gun = refEntity_t{};
 		gun.hModel = pi->weaponModel;
 		VectorCopy( origin, gun.lightingOrigin );
 		UI_PositionEntityOnTag( &gun, &torso, pi->torsoModel, "tag_weapon" );
@@ -817,7 +818,7 @@ void UI_DrawPlayer( float x, float y, float w, float h, playerInfo_t *pi, int ti
 	if ( pi->realWeapon == WP_MACHINEGUN || pi->realWeapon == WP_GAUNTLET || pi->realWeapon == WP_BFG ) {
 		vec3_t	angles;
 
-		memset( &barrel, 0, sizeof(barrel) );
+		barrel = refEntity_t{};
 		VectorCopy( origin, barrel.lightingOrigin );
 		barrel.renderfx = renderfx;
 
@@ -841,7 +842,7 @@ void UI_DrawPlayer( float x, float y, float w, float h, playerInfo_t *pi, int ti
 	//
 	if ( dp_realtime <= pi->muzzleFlashTime && pi->currentWeapon != WP_NONE ) {
 		if ( pi->flashModel ) {
-			memset( &flash, 0, sizeof(flash) );
+			flash = refEntity_t{};
 			flash.hModel = pi->flashModel;
 			VectorCopy( origin, flash.lightingOrigin );
 			UI_PositionEntityOnTag( &flash, &gun, pi->weaponModel, "tag_flash" );
@@ -860,7 +861,7 @@ void UI_DrawPlayer( float x, float y, float w, float h, playerInfo_t *pi, int ti
 	// add the chat icon
 	//
 	if ( pi->chat ) {
-		UI_PlayerFloatSprite( pi, origin, trap_R_RegisterShaderNoMip( "sprites/balloon3" ) );
+		UI_PlayerFloatSprite( origin, trap_R_RegisterShaderNoMip( "sprites/balloon3" ) );
 	}
 
 	//
@@ -917,10 +918,10 @@ static qboolean UI_ParseAnimationFile( const char *filename, animation_t *animat
 	char		*token;
 	float		fps;
 	int			skip;
-	char		text[20000];
+	std::array<char, 20001> text{};
 	fileHandle_t	f;
 
-	memset( animations, 0, sizeof( animation_t ) * MAX_ANIMATIONS );
+	std::fill_n( animations, MAX_ANIMATIONS, animation_t{} );
 
 	// load the file
 	len = trap_FS_FOpenFile( filename, &f, FS_READ );
@@ -930,17 +931,17 @@ static qboolean UI_ParseAnimationFile( const char *filename, animation_t *animat
 		}
 		return qfalse;
 	}
-	if ( len >= ( sizeof( text ) - 1 ) ) {
+	if ( len >= static_cast<int>( text.size() - 1 ) ) {
 		Com_Printf( "File %s too long\n", filename );
 		trap_FS_FCloseFile( f );
 		return qfalse;
 	}
-	trap_FS_Read( text, len, f );
+	trap_FS_Read( text.data(), len, f );
 	text[ len ] = '\0';
 	trap_FS_FCloseFile( f );
 
 	// parse the text
-	text_p = text;
+	text_p = text.data();
 	skip = 0;	// quite the compiler warning
 
 	// read optional parameters
@@ -1118,7 +1119,7 @@ UI_PlayerInfo_SetModel
 ===============
 */
 void UI_PlayerInfo_SetModel( playerInfo_t *pi, const char *model ) {
-	memset( pi, 0, sizeof(*pi) );
+	*pi = playerInfo_t{};
 	UI_RegisterClientModelname( pi, model );
 	pi->weapon = WP_MACHINEGUN;
 	pi->currentWeapon = pi->weapon;

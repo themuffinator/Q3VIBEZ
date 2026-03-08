@@ -1,8 +1,10 @@
 // Copyright (C) 1999-2000 Id Software, Inc.
 //
-#include "../game/q_shared.h"
+#include <array>
+
+#include "../sgame/q_shared.h"
 #include "tr_types.h"
-#include "../game/bg_public.h"
+#include "../sgame/bg_public.h"
 #include "cg_public.h"
 
 
@@ -487,7 +489,7 @@ typedef struct {
 
 	snapshot_t	*snap;				// cg.snap->serverTime <= cg.time
 	snapshot_t	*nextSnap;			// cg.nextSnap->serverTime > cg.time, or NULL
-	snapshot_t	activeSnapshots[2];
+	std::array<snapshot_t, 2> activeSnapshots;
 
 	float		frameInterpolation;	// (float)( cg.time - cg.frame->serverTime ) / (cg.nextFrame->serverTime - cg.frame->serverTime)
 
@@ -518,7 +520,7 @@ typedef struct {
 	vec3_t		predictedError;
 
 	int			eventSequence;
-	int			predictableEvents[MAX_PREDICTED_EVENTS];
+	std::array<int, MAX_PREDICTED_EVENTS> predictableEvents;
 
 	float		stepChange;				// for stair up smoothing
 	int			stepTime;
@@ -554,8 +556,8 @@ typedef struct {
 	int			scoresRequestTime;
 	int			numScores;
 	int			selectedScore;
-	int			teamScores[2];
-	score_t		scores[MAX_CLIENTS];
+	std::array<int, 2> teamScores;
+	std::array<score_t, MAX_CLIENTS> scores;
 	qboolean	showScores;
 	qboolean	scoreBoardShowing;
 	int			scoreFadeTime;
@@ -606,15 +608,15 @@ typedef struct {
 	// reward medals
 	int			rewardStack;
 	int			rewardTime;
-	int			rewardCount[MAX_REWARDSTACK];
-	qhandle_t	rewardShader[MAX_REWARDSTACK];
-	qhandle_t	rewardSound[MAX_REWARDSTACK];
+	std::array<int, MAX_REWARDSTACK> rewardCount;
+	std::array<qhandle_t, MAX_REWARDSTACK> rewardShader;
+	std::array<qhandle_t, MAX_REWARDSTACK> rewardSound;
 
 	// sound buffer mainly for announcer sounds
 	int			soundBufferIn;
 	int			soundBufferOut;
 	int			soundTime;
-	qhandle_t	soundBuffer[MAX_SOUNDBUFFER];
+	std::array<qhandle_t, MAX_SOUNDBUFFER> soundBuffer;
 	qhandle_t	soundPlaying;
 
 	// for voice chat buffer
@@ -677,7 +679,7 @@ typedef struct {
 	// optimized prediction
 	int				lastPredictedCommand;
 	int				lastServerTime;
-	playerState_t	savedPmoveStates[ NUM_SAVED_STATES ];
+	std::array<playerState_t, NUM_SAVED_STATES> savedPmoveStates;
 	int				stateHead, stateTail;
 
 	int				meanPing;
@@ -1101,8 +1103,8 @@ typedef struct {
 	clientInfo_t	clientinfo[MAX_CLIENTS];
 
 	// teamchat width is *3 because of embedded color codes
-	char			teamChatMsgs[TEAMCHAT_HEIGHT][TEAMCHAT_WIDTH*3+1];
-	int				teamChatMsgTimes[TEAMCHAT_HEIGHT];
+	std::array<std::array<char, TEAMCHAT_WIDTH * 3 + 1>, TEAMCHAT_HEIGHT> teamChatMsgs;
+	std::array<int, TEAMCHAT_HEIGHT> teamChatMsgTimes;
 	int				teamChatPos;
 	int				teamLastChatPos;
 
@@ -1253,7 +1255,7 @@ void CG_SelectFont( int index );
 //
 // cg_draw.c, cg_newDraw.c
 //
-extern	int sortedTeamPlayers[TEAM_MAXOVERLAY];
+extern	std::array<int, TEAM_MAXOVERLAY> sortedTeamPlayers;
 extern	int	numSortedTeamPlayers;
 extern	int drawTeamOverlayModificationCount;
 extern  char systemChat[256];

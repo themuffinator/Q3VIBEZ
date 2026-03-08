@@ -2,6 +2,8 @@
 //
 #include "ui_local.h"
 
+#include <array>
+
 
 #define ART_BACK0		"menu/art/back_0"
 #define ART_BACK1		"menu/art/back_1"	
@@ -43,7 +45,9 @@ typedef struct {
 
 static cinematicsMenuInfo_t	cinematicsMenuInfo;
 
-static char *cinematics[] = {
+namespace {
+
+constexpr std::array<const char *, 10> Cinematics = {
 	"idlogo",
 	"intro",
 	"tier1",
@@ -55,6 +59,10 @@ static char *cinematics[] = {
 	"tier7",
 	"end"
 };
+
+constexpr int CinematicsMenuItemOffset = 3;
+
+}
 
 /*
 ===============
@@ -86,7 +94,7 @@ static void UI_CinematicsMenu_Event( void *ptr, int event ) {
 		trap_Cmd_ExecuteText( EXEC_APPEND, "disconnect; cinematic demoEnd.RoQ 1\n" );
 	}
 	else {
-		trap_Cmd_ExecuteText( EXEC_APPEND, va( "disconnect; cinematic %s.RoQ\n", cinematics[n] ) );
+		trap_Cmd_ExecuteText( EXEC_APPEND, va( "disconnect; cinematic %s.RoQ\n", Cinematics[n] ) );
 	}
 }
 
@@ -101,7 +109,7 @@ static void UI_CinematicsMenu_Init( void ) {
 
 	UI_CinematicsMenu_Cache();
 
-	memset( &cinematicsMenuInfo, 0, sizeof(cinematicsMenuInfo) );
+	cinematicsMenuInfo = {};
 	cinematicsMenuInfo.menu.fullscreen = qtrue;
 
 	cinematicsMenuInfo.banner.generic.type		= MTYPE_BTEXT;
@@ -326,5 +334,5 @@ void UI_CinematicsMenu_f( void ) {
 
 	n = atoi( UI_Argv( 1 ) );
 	UI_CinematicsMenu();
-	Menu_SetCursorToItem( &cinematicsMenuInfo.menu, cinematicsMenuInfo.menu.items[n + 3] );
+	Menu_SetCursorToItem( &cinematicsMenuInfo.menu, cinematicsMenuInfo.menu.items[n + CinematicsMenuItemOffset] );
 }

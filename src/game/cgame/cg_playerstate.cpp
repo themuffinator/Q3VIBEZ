@@ -7,6 +7,31 @@
 
 #include "cg_local.h"
 
+#include <algorithm>
+
+namespace {
+
+[[nodiscard]] constexpr int PlayerStateEventIndex( const int sequence ) noexcept {
+	return sequence & ( MAX_PS_EVENTS - 1 );
+}
+
+[[nodiscard]] constexpr int PredictableEventIndex( const int sequence ) noexcept {
+	return sequence & ( MAX_PREDICTED_EVENTS - 1 );
+}
+
+void QueueReward( const sfxHandle_t sfx, const qhandle_t shader, const int rewardCount ) {
+	if ( cg.rewardStack >= MAX_REWARDSTACK - 1 ) {
+		return;
+	}
+
+	++cg.rewardStack;
+	cg.rewardSound[cg.rewardStack] = sfx;
+	cg.rewardShader[cg.rewardStack] = shader;
+	cg.rewardCount[cg.rewardStack] = rewardCount;
+}
+
+} // namespace
+
 /*
 ==============
 CG_CheckAmmo
@@ -104,10 +129,7 @@ void CG_DamageFeedback( int yawByte, int pitchByte, int damage ) {
 	}
 	kick = damage * scale;
 
-	if (kick < 5)
-		kick = 5;
-	if (kick > 10)
-		kick = 10;
+	kick = std::clamp( kick, 5.0f, 10.0f );
 
 	// if yaw and pitch are both 255, make the damage always centered (falling, etc)
 	if ( yawByte == 255 && pitchByte == 255 ) {
@@ -124,7 +146,7 @@ void CG_DamageFeedback( int yawByte, int pitchByte, int damage ) {
 		angles[YAW] = yaw;
 		angles[ROLL] = 0;
 
-		AngleVectors( angles, dir, NULL, NULL );
+		AngleVectors( angles, dir, nullptr, nullptr );
 		VectorSubtract( vec3_origin, dir, dir );
 
 		front = DotProduct (dir, cg.refdef.viewaxis[0] );
@@ -151,24 +173,9 @@ void CG_DamageFeedback( int yawByte, int pitchByte, int damage ) {
 	}
 
 	// clamp the position
-	if ( cg.damageX > 1.0 ) {
-		cg.damageX = 1.0;
-	}
-	if ( cg.damageX < - 1.0 ) {
-		cg.damageX = -1.0;
-	}
+	cg.damageX = std::clamp( cg.damageX, -1.0f, 1.0f );
+	cg.damageY = std::clamp( cg.damageY, -1.0f, 1.0f );
 
-	if ( cg.damageY > 1.0 ) {
-		cg.damageY = 1.0;
-	}
-	if ( cg.damageY < - 1.0 ) {
-		cg.damageY = -1.0;
-	}
-
-	// don't let the screen flashes vary as much
-	if ( kick > 10 ) {
-		kick = 10;
-	}
 	cg.damageValue = kick;
 	cg.v_dmg_time = cg.time + DAMAGE_TIME;
 	cg.damageTime = cg.snap->serverTime;
@@ -221,39 +228,26 @@ static void CG_CheckPlayerstateEvents( const playerState_t *ps, const playerStat
 	if ( n < 0 ) n  = 0;
 	// go through the predictable events buffer
 	for ( i = ps->eventSequence - MAX_PS_EVENTS ; i < ps->eventSequence ; i++ ) {
+		const int eventIndex = PlayerStateEventIndex( i );
+
 		// if we have a new predictable event
 		if ( i >= ops->eventSequence
 			// or the server told us to play another event instead of a predicted event we already issued
 			// or something the server told us changed our prediction causing a different event
-			|| (i > ops->eventSequence - MAX_PS_EVENTS && ps->events[i & (MAX_PS_EVENTS-1)] != ops->events[i & (MAX_PS_EVENTS-1)]) ) {
+			|| ( i > ops->eventSequence - MAX_PS_EVENTS && ps->events[eventIndex] != ops->events[eventIndex] ) ) {
 
-			event = ps->events[ i & (MAX_PS_EVENTS-1) ];
+			event = ps->events[eventIndex];
 			if ( event == EV_NONE ) // ignore empty events
 				continue;
 			cent->currentState.event = event;
-			cent->currentState.eventParm = ps->eventParms[ i & (MAX_PS_EVENTS-1) ];
+			cent->currentState.eventParm = ps->eventParms[eventIndex];
 
 			CG_EntityEvent( cent, cent->lerpOrigin, eventParm2[ n++ ] );
 
-			cg.predictableEvents[ i & (MAX_PREDICTED_EVENTS-1) ] = event;
+			cg.predictableEvents[ PredictableEventIndex( i ) ] = event;
 
 			cg.eventSequence++;
 		}
-	}
-}
-
-
-/*
-==================
-pushReward
-==================
-*/
-static void pushReward( sfxHandle_t sfx, qhandle_t shader, int rewardCount ) {
-	if ( cg.rewardStack < (MAX_REWARDSTACK-1 )) {
-		cg.rewardStack++;
-		cg.rewardSound[cg.rewardStack] = sfx;
-		cg.rewardShader[cg.rewardStack] = shader;
-		cg.rewardCount[cg.rewardStack] = rewardCount;
 	}
 }
 
@@ -330,7 +324,7 @@ void CG_CheckLocalSounds( playerState_t *ps, playerState_t *ops ) {
 	// reward sounds
 	reward = qfalse;
 	if (ps->persistant[PERS_CAPTURES] != ops->persistant[PERS_CAPTURES]) {
-		pushReward(cgs.media.captureAwardSound, cgs.media.medalCapture, ps->persistant[PERS_CAPTURES]);
+		QueueReward(cgs.media.captureAwardSound, cgs.media.medalCapture, ps->persistant[PERS_CAPTURES]);
 		reward = qtrue;
 		//Com_Printf("capture\n");
 	}
@@ -344,7 +338,7 @@ void CG_CheckLocalSounds( playerState_t *ps, playerState_t *ops ) {
 #else
 		sfx = cgs.media.impressiveSound;
 #endif
-		pushReward(sfx, cgs.media.medalImpressive, ps->persistant[PERS_IMPRESSIVE_COUNT]);
+		QueueReward(sfx, cgs.media.medalImpressive, ps->persistant[PERS_IMPRESSIVE_COUNT]);
 		reward = qtrue;
 		//Com_Printf("impressive\n");
 	}
@@ -358,7 +352,7 @@ void CG_CheckLocalSounds( playerState_t *ps, playerState_t *ops ) {
 #else
 		sfx = cgs.media.excellentSound;
 #endif
-		pushReward(sfx, cgs.media.medalExcellent, ps->persistant[PERS_EXCELLENT_COUNT]);
+		QueueReward(sfx, cgs.media.medalExcellent, ps->persistant[PERS_EXCELLENT_COUNT]);
 		reward = qtrue;
 		//Com_Printf("excellent\n");
 	}
@@ -372,17 +366,17 @@ void CG_CheckLocalSounds( playerState_t *ps, playerState_t *ops ) {
 #else
 		sfx = cgs.media.humiliationSound;
 #endif
-		pushReward(sfx, cgs.media.medalGauntlet, ps->persistant[PERS_GAUNTLET_FRAG_COUNT]);
+		QueueReward(sfx, cgs.media.medalGauntlet, ps->persistant[PERS_GAUNTLET_FRAG_COUNT]);
 		reward = qtrue;
 		//Com_Printf("guantlet frag\n");
 	}
 	if (ps->persistant[PERS_DEFEND_COUNT] != ops->persistant[PERS_DEFEND_COUNT]) {
-		pushReward(cgs.media.defendSound, cgs.media.medalDefend, ps->persistant[PERS_DEFEND_COUNT]);
+		QueueReward(cgs.media.defendSound, cgs.media.medalDefend, ps->persistant[PERS_DEFEND_COUNT]);
 		reward = qtrue;
 		//Com_Printf("defend\n");
 	}
 	if (ps->persistant[PERS_ASSIST_COUNT] != ops->persistant[PERS_ASSIST_COUNT]) {
-		pushReward(cgs.media.assistSound, cgs.media.medalAssist, ps->persistant[PERS_ASSIST_COUNT]);
+		QueueReward(cgs.media.assistSound, cgs.media.medalAssist, ps->persistant[PERS_ASSIST_COUNT]);
 		reward = qtrue;
 		//Com_Printf("assist\n");
 	}

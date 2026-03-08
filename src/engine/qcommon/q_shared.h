@@ -1046,7 +1046,7 @@ struct cvar_s {
 
 #define	MAX_CVAR_VALUE_STRING	256
 
-typedef int	cvarHandle_t;
+typedef int32_t	cvarHandle_t;
 
 // the modules that run in the virtual machine can't access the cvar_t directly,
 // so they must ask for structured updates
@@ -1057,6 +1057,16 @@ typedef struct {
 	int			integer;
 	char		string[MAX_CVAR_VALUE_STRING];
 } vmCvar_t;
+
+#ifdef __cplusplus
+static_assert( sizeof( cvarHandle_t ) == 4, "cvarHandle_t must remain 32-bit" );
+static_assert( offsetof( vmCvar_t, handle ) == 0, "vmCvar_t::handle ABI changed" );
+static_assert( offsetof( vmCvar_t, modificationCount ) == 4, "vmCvar_t::modificationCount ABI changed" );
+static_assert( offsetof( vmCvar_t, value ) == 8, "vmCvar_t::value ABI changed" );
+static_assert( offsetof( vmCvar_t, integer ) == 12, "vmCvar_t::integer ABI changed" );
+static_assert( offsetof( vmCvar_t, string ) == 16, "vmCvar_t::string ABI changed" );
+static_assert( sizeof( vmCvar_t ) == 16 + MAX_CVAR_VALUE_STRING, "vmCvar_t ABI changed" );
+#endif
 
 /*
 ==============================================================

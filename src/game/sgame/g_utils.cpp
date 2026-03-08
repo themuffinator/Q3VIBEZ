@@ -2,49 +2,177 @@
 //
 // g_utils.c -- misc utility functions for game module
 
+#include <array>
+#include <span>
+
 #include "g_local.h"
 
-typedef struct {
-  char oldShader[MAX_QPATH];
-  char newShader[MAX_QPATH];
-  float timeOffset;
-} shaderRemap_t;
+struct shaderRemap_t {
+	char oldShader[MAX_QPATH];
+	char newShader[MAX_QPATH];
+	float timeOffset;
+};
 
-#define MAX_SHADER_REMAPS 128
+constexpr int MaxShaderRemaps = 128;
+constexpr int MaxTargetChoices = 32;
 
 int remapCount = 0;
-shaderRemap_t remappedShaders[MAX_SHADER_REMAPS];
+std::array<shaderRemap_t, MaxShaderRemaps> remappedShaders{};
 
-void AddRemap(const char *oldShader, const char *newShader, float timeOffset) {
-	int i;
+namespace {
+auto ActiveShaderRemaps() -> std::span<shaderRemap_t> {
+	return std::span{ remappedShaders }.first( static_cast<std::size_t>( remapCount ) );
+}
 
-	for (i = 0; i < remapCount; i++) {
-		if (Q_stricmp(oldShader, remappedShaders[i].oldShader) == 0) {
-			// found it, just update this one
-			strcpy(remappedShaders[i].newShader,newShader);
-			remappedShaders[i].timeOffset = timeOffset;
-			return;
+auto ActiveShaderRemapsView() -> std::span<const shaderRemap_t> {
+	return std::span{ remappedShaders }.first( static_cast<std::size_t>( remapCount ) );
+}
+
+void SetShaderRemap( shaderRemap_t &remap, const char *oldShader, const char *newShader, float timeOffset ) {
+	Q_strncpyz( remap.oldShader, oldShader, sizeof( remap.oldShader ) );
+	Q_strncpyz( remap.newShader, newShader, sizeof( remap.newShader ) );
+	remap.timeOffset = timeOffset;
+}
+
+auto FindShaderRemap( const char *oldShader ) -> shaderRemap_t * {
+	for ( auto &remap : ActiveShaderRemaps() ) {
+		if ( Q_stricmp( oldShader, remap.oldShader ) == 0 ) {
+			return &remap;
 		}
 	}
-	if (remapCount < MAX_SHADER_REMAPS) {
-		strcpy(remappedShaders[remapCount].newShader,newShader);
-		strcpy(remappedShaders[remapCount].oldShader,oldShader);
-		remappedShaders[remapCount].timeOffset = timeOffset;
+	return nullptr;
+}
+
+auto EntityFieldStringValue( const gentity_t &entity, intptr_t fieldofs ) -> const char * {
+	return *reinterpret_cast<char *const *>( reinterpret_cast<const byte *>( &entity ) + fieldofs );
+}
+
+auto NextTempVectorSlot() -> vec3_t & {
+	static std::array<vec3_t, 8> vecs{};
+	static std::size_t index = 0;
+
+	vec3_t &value = vecs[index];
+	index = ( index + 1 ) % vecs.size();
+	return value;
+}
+
+auto NextVectorStringSlot() -> std::array<char, 32> & {
+	static std::array<std::array<char, 32>, 8> strings{};
+	static std::size_t index = 0;
+
+	auto &value = strings[index];
+	index = ( index + 1 ) % strings.size();
+	return value;
+}
+
+auto ActiveNonClientEntities() -> std::span<gentity_t> {
+	if ( level.num_entities <= MAX_CLIENTS ) {
+		return {};
+	}
+	return { g_entities + MAX_CLIENTS, static_cast<std::size_t>( level.num_entities - MAX_CLIENTS ) };
+}
+
+auto CanReuseEntitySlot( const gentity_t &entity, int timeout ) -> qboolean {
+	if ( entity.inuse ) {
+		return qfalse;
+	}
+
+	// the first couple seconds of server time can involve a lot of
+	// freeing and allocating, so relax the replacement policy
+	if ( entity.freetime > level.startTime + 2000 && level.time - entity.freetime < timeout ) {
+		return qfalse;
+	}
+
+	return qtrue;
+}
+
+auto FindReusableEntitySlot( int timeout ) -> gentity_t * {
+	for ( auto &entity : ActiveNonClientEntities() ) {
+		if ( CanReuseEntitySlot( entity, timeout ) ) {
+			return &entity;
+		}
+	}
+	return nullptr;
+}
+
+void DumpActiveEntityClassnames() {
+	for ( int entityNumber = 0; entityNumber < MAX_GENTITIES; ++entityNumber ) {
+		G_Printf( "%4i: %s\n", entityNumber, g_entities[entityNumber].classname );
+	}
+}
+
+auto ReserveNewEntitySlot() -> gentity_t * {
+	gentity_t *entity = &g_entities[level.num_entities];
+	level.num_entities++;
+
+	// let the server system know that there are more entities
+	trap_LocateGameData( level.gentities, level.num_entities, sizeof( gentity_t ),
+		&level.clients[0].ps, sizeof( level.clients[0] ) );
+
+	return entity;
+}
+
+void ResetFreedEntity( gentity_t &entity ) {
+	entity = {};
+	entity.classname = "freed";
+	entity.freetime = level.time;
+	entity.inuse = qfalse;
+}
+
+void SnapPosition( const vec3_t origin, vec3_t snapped ) {
+	VectorCopy( origin, snapped );
+	SnapVector( snapped );
+}
+
+auto AdvancedEventBits( int currentEvent ) -> int {
+	return ( currentEvent + EV_EVENT_BIT1 ) & EV_EVENT_BITS;
+}
+
+void SetClientExternalEvent( gclient_t &client, int event, int eventParm ) {
+	const int bits = AdvancedEventBits( client.ps.externalEvent & EV_EVENT_BITS );
+	client.ps.externalEvent = event | bits;
+	client.ps.externalEventParm = eventParm;
+	client.ps.externalEventTime = level.time;
+}
+
+void SetEntityStateEvent( gentity_t &entity, int event, int eventParm ) {
+	const int bits = AdvancedEventBits( entity.s.event & EV_EVENT_BITS );
+	entity.s.event = event | bits;
+	entity.s.eventParm = eventParm;
+}
+
+void SetStationaryTrajectory( trajectory_t &trajectory, const vec3_t origin ) {
+	VectorCopy( origin, trajectory.trBase );
+	trajectory.trType = TR_STATIONARY;
+	trajectory.trTime = 0;
+	trajectory.trDuration = 0;
+	VectorClear( trajectory.trDelta );
+}
+}
+
+void AddRemap(const char *oldShader, const char *newShader, float timeOffset) {
+	if ( auto *existingRemap = FindShaderRemap( oldShader ) ) {
+		// found it, just update this one
+		SetShaderRemap( *existingRemap, oldShader, newShader, timeOffset );
+		return;
+	}
+
+	if ( remapCount < static_cast<int>( remappedShaders.size() ) ) {
+		SetShaderRemap( remappedShaders[ remapCount ], oldShader, newShader, timeOffset );
 		remapCount++;
 	}
 }
 
 const char *BuildShaderStateConfig(void) {
-	static char	buff[MAX_STRING_CHARS*4];
-	char out[(MAX_QPATH * 2) + 5];
-	int i;
-  
-	memset( buff, 0, sizeof( buff ) );
-	for (i = 0; i < remapCount; i++) {
-		Com_sprintf(out, (MAX_QPATH * 2) + 5, "%s=%s:%5.2f@", remappedShaders[i].oldShader, remappedShaders[i].newShader, remappedShaders[i].timeOffset);
-		Q_strcat( buff, sizeof( buff ), out);
+	static std::array<char, MAX_STRING_CHARS * 4> buffer{};
+	std::array<char, (MAX_QPATH * 2) + 5> entry{};
+
+	buffer = {};
+	for ( const auto &remap : ActiveShaderRemapsView() ) {
+		Com_sprintf( entry.data(), entry.size(), "%s=%s:%5.2f@", remap.oldShader, remap.newShader, remap.timeOffset );
+		Q_strcat( buffer.data(), buffer.size(), entry.data() );
 	}
-	return buff;
+	return buffer.data();
 }
 
 /*
@@ -63,18 +191,18 @@ G_FindConfigstringIndex
 */
 int G_FindConfigstringIndex( const char *name, int start, int max, qboolean create ) {
 	int		i;
-	char	s[MAX_STRING_CHARS];
+	std::array<char, MAX_STRING_CHARS> s{};
 
 	if ( !name || !name[0] ) {
 		return 0;
 	}
 
 	for ( i=1 ; i<max ; i++ ) {
-		trap_GetConfigstring( start + i, s, sizeof( s ) );
+		trap_GetConfigstring( start + i, s.data(), s.size() );
 		if ( !s[0] ) {
 			break;
 		}
-		if ( !strcmp( s, name ) ) {
+		if ( !strcmp( s.data(), name ) ) {
 			return i;
 		}
 	}
@@ -139,7 +267,7 @@ NULL will be returned if the end of the list is reached.
 gentity_t *G_Find (gentity_t *from, intptr_t fieldofs, const char *match)
 {
 	const gentity_t *to;
-	char	*s;
+	const char *fieldValue;
 
 	if (!from)
 		from = g_entities;
@@ -152,14 +280,14 @@ gentity_t *G_Find (gentity_t *from, intptr_t fieldofs, const char *match)
 	{
 		if (!from->inuse)
 			continue;
-		s = *(char **) ((byte *)from + fieldofs);
-		if (!s)
+		fieldValue = EntityFieldStringValue( *from, fieldofs );
+		if (!fieldValue)
 			continue;
-		if (!Q_stricmp (s, match))
+		if (!Q_stricmp (fieldValue, match))
 			return from;
 	}
 
-	return NULL;
+	return nullptr;
 }
 
 
@@ -170,39 +298,30 @@ G_PickTarget
 Selects a random entity from among the targets
 =============
 */
-#define MAXCHOICES	32
-
 gentity_t *G_PickTarget( const char *targetname )
 {
-	gentity_t	*choice[MAXCHOICES];
-	gentity_t	*ent;
-	int			num_choices;
+	std::array<gentity_t *, MaxTargetChoices> choices{};
+	gentity_t	*ent = nullptr;
+	int			numChoices = 0;
 
 	if (!targetname)
 	{
 		G_Printf("G_PickTarget called with NULL targetname\n");
-		return NULL;
+		return nullptr;
 	}
 
-	ent = NULL;
-	num_choices = 0;
-	while(1)
-	{
-		ent = G_Find (ent, FOFS(targetname), targetname);
-		if (!ent)
-			break;
-		choice[num_choices++] = ent;
-		if ( num_choices >= MAXCHOICES )
-			break;
+	while ( numChoices < static_cast<int>( choices.size() ) &&
+		( ent = G_Find( ent, FOFS(targetname), targetname ) ) != nullptr ) {
+		choices[numChoices++] = ent;
 	}
 
-	if (!num_choices)
+	if (!numChoices)
 	{
 		G_Printf("G_PickTarget: target %s not found\n", targetname);
-		return NULL;
+		return nullptr;
 	}
 
-	return choice[rand() % num_choices];
+	return choices[rand() % numChoices];
 }
 
 
@@ -235,8 +354,8 @@ void G_UseTargets( gentity_t *ent, gentity_t *activator ) {
 		return;
 	}
 
-	t = NULL;
-	while ( (t = G_Find (t, FOFS(targetname), ent->target)) != NULL ) {
+	t = nullptr;
+	while ( (t = G_Find (t, FOFS(targetname), ent->target)) != nullptr ) {
 		if ( t == ent ) {
 			G_Printf ("WARNING: Entity used itself.\n");
 		} else {
@@ -261,14 +380,7 @@ for making temporary vectors for function calls
 =============
 */
 float	*tv( float x, float y, float z ) {
-	static	int		index;
-	static	vec3_t	vecs[8];
-	float	*v;
-
-	// use an array so that multiple tempvectors won't collide
-	// for a while
-	v = vecs[index];
-	index = (index + 1)&7;
+	float *v = NextTempVectorSlot();
 
 	v[0] = x;
 	v[1] = y;
@@ -287,17 +399,9 @@ for printing vectors
 =============
 */
 char	*vtos( const vec3_t v ) {
-	static	int		index;
-	static	char	str[8][32];
-	char	*s;
-
-	// use an array so that multiple vtos won't collide
-	s = str[index];
-	index = (index + 1)&7;
-
-	Com_sprintf (s, 32, "(%i %i %i)", (int)v[0], (int)v[1], (int)v[2]);
-
-	return s;
+	auto &string = NextVectorStringSlot();
+	Com_sprintf( string.data(), string.size(), "(%i %i %i)", (int)v[0], (int)v[1], (int)v[2] );
+	return string.data();
 }
 
 
@@ -322,7 +426,7 @@ void G_SetMovedir( vec3_t angles, vec3_t movedir ) {
 	} else if ( VectorCompare (angles, VEC_DOWN) ) {
 		VectorCopy (MOVEDIR_DOWN, movedir);
 	} else {
-		AngleVectors (angles, movedir, NULL, NULL);
+		AngleVectors (angles, movedir, nullptr, nullptr);
 	}
 	VectorClear( angles );
 }
@@ -375,27 +479,13 @@ angles and bad trails.
 =================
 */
 gentity_t *G_Spawn( void ) {
-	int			i, timeout;
-	gentity_t	*e;
-
-	e = NULL; // shut up warning
+	gentity_t *e = nullptr;
 	// try to release oldest items first
-	for ( timeout = 1000 ; timeout >= 0 ; timeout -= 250 ) {
+	for ( int timeout = 1000; timeout >= 0; timeout -= 250 ) {
 		// if we go through all entities and can't find one to free,
 		// override the normal minimum times before use
-		e = &g_entities[ MAX_CLIENTS ];
-		for ( i = MAX_CLIENTS ; i < level.num_entities; i++, e++ ) {
-			if ( e->inuse ) {
-				continue;
-			}
-
-			// the first couple seconds of server time can involve a lot of
-			// freeing and allocating, so relax the replacement policy
-			if ( e->freetime > level.startTime + 2000 && level.time - e->freetime < timeout ) {
-				continue;
-			}
-
-			// reuse this slot
+		if ( auto *reusableEntity = FindReusableEntitySlot( timeout ) ) {
+			e = reusableEntity;
 			G_InitGentity( e );
 			return e;
 		}
@@ -405,20 +495,13 @@ gentity_t *G_Spawn( void ) {
 		}
 	}
 
-	if ( i == ENTITYNUM_MAX_NORMAL ) {
-		for (i = 0; i < MAX_GENTITIES; i++) {
-			G_Printf("%4i: %s\n", i, g_entities[i].classname);
-		}
+	if ( level.num_entities == ENTITYNUM_MAX_NORMAL ) {
+		DumpActiveEntityClassnames();
 		G_Error( "G_Spawn: no free entities" );
 	}
 	
 	// open up a new slot
-	level.num_entities++;
-
-	// let the server system know that there are more entities
-	trap_LocateGameData( level.gentities, level.num_entities, sizeof( gentity_t ), 
-		&level.clients[0].ps, sizeof( level.clients[0] ) );
-
+	e = ReserveNewEntitySlot();
 	G_InitGentity( e );
 	return e;
 }
@@ -430,16 +513,10 @@ G_EntitiesFree
 =================
 */
 qboolean G_EntitiesFree( void ) {
-	int			i;
-	gentity_t	*e;
-
-	e = &g_entities[MAX_CLIENTS];
-	for ( i = MAX_CLIENTS; i < level.num_entities; i++, e++) {
-		if ( e->inuse ) {
-			continue;
+	for ( const auto &entity : ActiveNonClientEntities() ) {
+		if ( !entity.inuse ) {
+			return qtrue;
 		}
-		// slot available
-		return qtrue;
 	}
 	return qfalse;
 }
@@ -459,10 +536,7 @@ void G_FreeEntity( gentity_t *ed ) {
 		return;
 	}
 
-	memset (ed, 0, sizeof(*ed));
-	ed->classname = "freed";
-	ed->freetime = level.time;
-	ed->inuse = qfalse;
+	ResetFreedEntity( *ed );
 }
 
 
@@ -486,8 +560,7 @@ gentity_t *G_TempEntity( vec3_t origin, int event ) {
 	e->eventTime = level.time;
 	e->freeAfterEvent = qtrue;
 
-	VectorCopy( origin, snapped );
-	SnapVector( snapped );		// save network bandwidth
+	SnapPosition( origin, snapped );		// save network bandwidth
 	G_SetOrigin( e, snapped );
 
 	// find cluster for PVS
@@ -515,23 +588,22 @@ of ent.  Ent should be unlinked before calling this!
 =================
 */
 void G_KillBox (gentity_t *ent) {
-	int			i, num;
-	int			touch[MAX_GENTITIES];
-	gentity_t	*hit;
+	int			num;
+	std::array<int, MAX_GENTITIES> touch{};
 	vec3_t		mins, maxs;
 
 	VectorAdd( ent->client->ps.origin, ent->r.mins, mins );
 	VectorAdd( ent->client->ps.origin, ent->r.maxs, maxs );
-	num = trap_EntitiesInBox( mins, maxs, touch, MAX_GENTITIES );
+	num = trap_EntitiesInBox( mins, maxs, touch.data(), touch.size() );
 
-	for (i=0 ; i<num ; i++) {
-		hit = &g_entities[touch[i]];
+	for ( int index = 0 ; index < num ; ++index ) {
+		gentity_t *hit = &g_entities[touch[index]];
 		if ( !hit->client ) {
 			continue;
 		}
 
 		// nail it
-		G_Damage ( hit, ent, ent, NULL, NULL,
+		G_Damage ( hit, ent, ent, nullptr, nullptr,
 			100000, DAMAGE_NO_PROTECTION, MOD_TELEFRAG);
 	}
 
@@ -564,9 +636,6 @@ Adds an event+parm and twiddles the event counter
 ===============
 */
 void G_AddEvent( gentity_t *ent, int event, int eventParm ) {
-	int		bits;
-	gclient_t *client;
-
 	if ( !event ) {
 		G_Printf( "G_AddEvent: zero event added for entity %i\n", ent->s.number );
 		return;
@@ -574,17 +643,9 @@ void G_AddEvent( gentity_t *ent, int event, int eventParm ) {
 
 	// clients need to add the event in playerState_t instead of entityState_t
 	if ( ent->client ) {
-		client = ent->client;
-		bits = client->ps.externalEvent & EV_EVENT_BITS;
-		bits = ( bits + EV_EVENT_BIT1 ) & EV_EVENT_BITS;
-		client->ps.externalEvent = event | bits;
-		client->ps.externalEventParm = eventParm;
-		client->ps.externalEventTime = level.time;
+		SetClientExternalEvent( *ent->client, event, eventParm );
 	} else {
-		bits = ent->s.event & EV_EVENT_BITS;
-		bits = ( bits + EV_EVENT_BIT1 ) & EV_EVENT_BITS;
-		ent->s.event = event | bits;
-		ent->s.eventParm = eventParm;
+		SetEntityStateEvent( *ent, event, eventParm );
 	}
 	ent->eventTime = level.time;
 }
@@ -614,12 +675,7 @@ Sets the pos trajectory for a fixed position
 ================
 */
 void G_SetOrigin( gentity_t *ent, vec3_t origin ) {
-	VectorCopy( origin, ent->s.pos.trBase );
-	ent->s.pos.trType = TR_STATIONARY;
-	ent->s.pos.trTime = 0;
-	ent->s.pos.trDuration = 0;
-	VectorClear( ent->s.pos.trDelta );
-
+	SetStationaryTrajectory( ent->s.pos, origin );
 	VectorCopy( origin, ent->r.currentOrigin );
 }
 

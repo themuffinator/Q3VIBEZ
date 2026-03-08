@@ -15,9 +15,7 @@ DLLEXPORT void dllEntry( dllSyscall_t syscallptr ) {
 }
 
 int PASSFLOAT( float x ) {
-	float	floatTemp;
-	floatTemp = x;
-	return *(int *)&floatTemp;
+	return Q_FloatAsInt( x );
 }
 
 void	trap_Print( const char *text ) {
@@ -456,13 +454,13 @@ void trap_BotFreeCharacter(int character) {
 float trap_Characteristic_Float(int character, int index) {
 	int temp;
 	temp = syscall( BOTLIB_AI_CHARACTERISTIC_FLOAT, character, index );
-	return (*(float*)&temp);
+	return Q_IntAsFloat( temp );
 }
 
 float trap_Characteristic_BFloat(int character, int index, float min, float max) {
 	int temp;
 	temp = syscall( BOTLIB_AI_CHARACTERISTIC_BFLOAT, character, index, PASSFLOAT(min), PASSFLOAT(max) );
-	return (*(float*)&temp);
+	return Q_IntAsFloat( temp );
 }
 
 int trap_Characteristic_Integer(int character, int index) {

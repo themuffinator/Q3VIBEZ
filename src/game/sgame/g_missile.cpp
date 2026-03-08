@@ -74,6 +74,45 @@ void G_ExplodeMissile( gentity_t *ent ) {
 
 
 #ifdef MISSIONPACK
+static void ProximityMine_Explode( gentity_t *mine );
+static void ProximityMine_Die( gentity_t *ent, gentity_t *inflictor, gentity_t *attacker, int damage, int mod );
+
+namespace {
+
+void FreeEntityAndClear( gentity_t *&entity ) {
+	if ( entity != nullptr ) {
+		G_FreeEntity( entity );
+		entity = nullptr;
+	}
+}
+
+[[nodiscard]] bool IsFriendlyProximityMine( const gentity_t *trigger, const gentity_t *other ) {
+	return g_gametype.integer >= GT_TEAM && trigger->parent->s.generic1 == other->client->sess.sessionTeam;
+}
+
+void InitializeProximityTriggerBounds( gentity_t &trigger, const float radius ) {
+	VectorSet( trigger.r.mins, -radius, -radius, -radius );
+	VectorSet( trigger.r.maxs, radius, radius, radius );
+}
+
+void ArmProximityMine( gentity_t &mine ) {
+	mine.think = ProximityMine_Explode;
+	mine.nextthink = level.time + g_proxMineTimeout.integer;
+	mine.takedamage = qtrue;
+	mine.health = 1;
+	mine.die = ProximityMine_Die;
+	mine.s.loopSound = G_SoundIndex( "sound/weapons/proxmine/wstbtick.wav" );
+}
+
+void HideStuckProximityMine( gentity_t &mine ) {
+	mine.s.eFlags |= EF_NODRAW;
+	mine.r.svFlags |= SVF_NOCLIENT;
+	mine.s.pos.trType = TR_LINEAR;
+	VectorClear( mine.s.pos.trDelta );
+}
+
+} // namespace
+
 /*
 ================
 ProximityMine_Explode
@@ -82,10 +121,7 @@ ProximityMine_Explode
 static void ProximityMine_Explode( gentity_t *mine ) {
 	G_ExplodeMissile( mine );
 	// if the prox mine has a trigger free it
-	if (mine->activator) {
-		G_FreeEntity(mine->activator);
-		mine->activator = NULL;
-	}
+	FreeEntityAndClear( mine->activator );
 }
 
 /*
@@ -118,11 +154,9 @@ void ProximityMine_Trigger( gentity_t *trigger, gentity_t *other, trace_t *trace
 	}
 
 
-	if ( g_gametype.integer >= GT_TEAM ) {
-		// don't trigger same team mines
-		if (trigger->parent->s.generic1 == other->client->sess.sessionTeam) {
-			return;
-		}
+	// don't trigger same team mines
+	if ( IsFriendlyProximityMine( trigger, other ) ) {
+		return;
 	}
 
 	// ok, now check for ability to damage so we don't get triggered thru walls, closed doors, etc...
@@ -146,25 +180,15 @@ ProximityMine_Activate
 */
 static void ProximityMine_Activate( gentity_t *ent ) {
 	gentity_t	*trigger;
-	float		r;
+	const float	radius = ent->splashRadius;
 
-	ent->think = ProximityMine_Explode;
-	ent->nextthink = level.time + g_proxMineTimeout.integer;
-
-	ent->takedamage = qtrue;
-	ent->health = 1;
-	ent->die = ProximityMine_Die;
-
-	ent->s.loopSound = G_SoundIndex( "sound/weapons/proxmine/wstbtick.wav" );
+	ArmProximityMine( *ent );
 
 	// build the proximity trigger
 	trigger = G_Spawn ();
 
 	trigger->classname = "proxmine_trigger";
-
-	r = ent->splashRadius;
-	VectorSet( trigger->r.mins, -r, -r, -r );
-	VectorSet( trigger->r.maxs, r, r, r );
+	InitializeProximityTriggerBounds( *trigger, radius );
 
 	G_SetOrigin( trigger, ent->s.pos.trBase );
 
@@ -226,10 +250,7 @@ static void ProximityMine_Player( gentity_t *mine, gentity_t *player ) {
 	player->client->ps.eFlags |= EF_TICKING;
 	player->activator = mine;
 
-	mine->s.eFlags |= EF_NODRAW;
-	mine->r.svFlags |= SVF_NOCLIENT;
-	mine->s.pos.trType = TR_LINEAR;
-	VectorClear( mine->s.pos.trDelta );
+	HideStuckProximityMine( *mine );
 
 	mine->enemy = player;
 	mine->think = ProximityMine_ExplodeOnPlayer;

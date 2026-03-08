@@ -2,9 +2,137 @@
 //
 #include "g_local.h"
 
+#include <algorithm>
+#include <array>
+#include <cctype>
+#include <span>
+
 #ifdef MISSIONPACK
 #include "../../ui/menudef.h"			// for the voice chats
 #endif
+
+namespace {
+
+int ScoreboardPing( const gclient_t &client ) {
+	if ( client.pers.connected == CON_CONNECTING ) {
+		return -1;
+	}
+
+	return client.ps.ping < 999 ? client.ps.ping : 999;
+}
+
+int ScoreboardAccuracy( const gclient_t &client ) {
+	if ( client.accuracy_shots == 0 ) {
+		return 0;
+	}
+
+	return client.accuracy_hits * 100 / client.accuracy_shots;
+}
+
+int ScoreboardPerfect( const gclient_t &client ) {
+	return ( client.ps.persistant[PERS_RANK] == 0 && client.ps.persistant[PERS_KILLED] == 0 ) ? 1 : 0;
+}
+
+bool AppendScoreboardEntry( std::span<char> buffer, const std::span<const char> entry, const int prefix_length, const int entry_length, int &buffer_length ) {
+	if ( buffer_length + entry_length + prefix_length >= static_cast<int>( buffer.size() ) ) {
+		return false;
+	}
+
+	std::copy_n( entry.data(), entry_length + 1, buffer.data() + buffer_length );
+	buffer_length += entry_length;
+	return true;
+}
+
+char LowercaseSanitizedChar( const char value ) {
+	return static_cast<char>( std::tolower( static_cast<unsigned char>( value ) ) );
+}
+
+static const auto VoteCommands = std::to_array<const char *>( {
+	"map_restart",
+	"map",
+	"rotate",
+	"nextmap",
+	"kick",
+	"clientkick",
+	"g_gametype",
+	"g_unlagged",
+	"g_warmup",
+	"timelimit",
+	"fraglimit",
+	"capturelimit"
+} );
+
+const char *InvalidVoteCommandMessage =
+	"print \"Invalid vote command.\nVote commands are: \n"
+	" g_gametype <n|ffa|duel|tdm|ctf>\n"
+	" map_restart, map <mapname>, rotate [round], nextmap\n"
+	" kick <player>, clientkick <clientnum>\n"
+	" g_unlagged <0|1>, g_warmup <-1|0|seconds>\n"
+	" timelimit <time>, fraglimit <frags>, capturelimit <captures>.\n\"";
+
+bool ExtractVoteCommandName( char *&command, std::array<char, MAX_CVAR_VALUE_STRING> &buffer ) {
+	char *out = buffer.data();
+	while ( *command != '\0' && *command != ' ' ) {
+		*out++ = *command++;
+	}
+	*out = '\0';
+	while ( *command == ' ' || *command == '\t' ) {
+		++command;
+	}
+	return buffer.front() != '\0';
+}
+
+bool NormalizeGametypeVote( const int clientNum, char *base, char *command ) {
+	int gametype = GT_FFA;
+	if ( !Q_stricmp( command, "ffa" ) ) {
+		gametype = GT_FFA;
+	}
+	else if ( !Q_stricmp( command, "duel" ) ) {
+		gametype = GT_TOURNAMENT;
+	}
+	else if ( !Q_stricmp( command, "tdm" ) ) {
+		gametype = GT_TEAM;
+	}
+	else if ( !Q_stricmp( command, "ctf" ) ) {
+		gametype = GT_CTF;
+	}
+	else {
+		gametype = atoi( command );
+		if ( gametype == GT_SINGLE_PLAYER || gametype < GT_FFA || gametype >= GT_MAX_GAME_TYPE ) {
+			trap_SendServerCommand( clientNum, va( "print \"Invalid gametype %i.\n\"", gametype ) );
+			return false;
+		}
+	}
+
+	BG_sprintf( base, "g_gametype %i", gametype );
+	return true;
+}
+
+void BuildCallVoteCommandBuffer( std::array<char, MAX_STRING_TOKENS> &buffer, const int argc ) {
+	char *out = buffer.data();
+	buffer[0] = '\0';
+	std::array<char, MAX_STRING_TOKENS> argument{};
+	for ( int index = 1; index < argc; ++index ) {
+		if ( buffer[0] ) {
+			out = Q_stradd( out, " " );
+		}
+		trap_Argv( index, argument.data(), static_cast<int>( argument.size() ) );
+		out = Q_stradd( out, argument.data() );
+	}
+}
+
+void RebuildCallVoteCommandBuffer( std::array<char, MAX_STRING_TOKENS> &buffer, const std::span<char *> commands ) {
+	char *out = buffer.data();
+	buffer[0] = '\0';
+	for ( char *command : commands ) {
+		if ( buffer[0] ) {
+			out = Q_stradd( out, ";" );
+		}
+		out = Q_stradd( out, command );
+	}
+}
+
+} // namespace
 
 /*
 ==================
@@ -13,67 +141,50 @@ DeathmatchScoreboardMessage
 ==================
 */
 void DeathmatchScoreboardMessage( gentity_t *ent ) {
-	char		entry[256]; // enough to hold 14 integers
-	char		string[MAX_STRING_CHARS-1];
+	std::array<char, 256> entry{}; // enough to hold 14 integers
+	std::array<char, MAX_STRING_CHARS - 1> string{};
 	int			stringlength;
-	int			i, j, ping, prefix;
+	int			i, j, prefix;
 	gclient_t	*cl;
-	int			numSorted, scoreFlags, accuracy, perfect;
+	int			numSorted, scoreFlags;
 
 	// send the latest information on all clients
-	string[0] = '\0';
 	stringlength = 0;
 	scoreFlags = 0;
 
 	numSorted = level.numConnectedClients;
 
 	// estimate prefix length to avoid oversize of final string
-	prefix = BG_sprintf( entry, "scores %i %i %i", level.teamScores[TEAM_RED], level.teamScores[TEAM_BLUE], numSorted );
+	prefix = BG_sprintf( entry.data(), "scores %i %i %i", level.teamScores[TEAM_RED], level.teamScores[TEAM_BLUE], numSorted );
 	
 	for ( i = 0 ; i < numSorted ; i++ ) {
+		const int client_num = level.sortedClients[i];
+		cl = &level.clients[client_num];
 
-		cl = &level.clients[level.sortedClients[i]];
-
-		if ( cl->pers.connected == CON_CONNECTING ) {
-			ping = -1;
-		} else {
-			ping = cl->ps.ping < 999 ? cl->ps.ping : 999;
-		}
-
-		if( cl->accuracy_shots ) {
-			accuracy = cl->accuracy_hits * 100 / cl->accuracy_shots;
-		} else {
-			accuracy = 0;
-		}
-
-		perfect = ( cl->ps.persistant[PERS_RANK] == 0 && cl->ps.persistant[PERS_KILLED] == 0 ) ? 1 : 0;
-
-		j = BG_sprintf( entry, " %i %i %i %i %i %i %i %i %i %i %i %i %i %i",
-			level.sortedClients[i],
+		j = BG_sprintf( entry.data(), " %i %i %i %i %i %i %i %i %i %i %i %i %i %i",
+			client_num,
 			cl->ps.persistant[PERS_SCORE],
-			ping,
+			ScoreboardPing( *cl ),
 			(level.time - cl->pers.enterTime)/60000,
 			scoreFlags,
-			g_entities[level.sortedClients[i]].s.powerups,
-			accuracy, 
+			g_entities[client_num].s.powerups,
+			ScoreboardAccuracy( *cl ),
 			cl->ps.persistant[PERS_IMPRESSIVE_COUNT],
 			cl->ps.persistant[PERS_EXCELLENT_COUNT],
 			cl->ps.persistant[PERS_GAUNTLET_FRAG_COUNT], 
 			cl->ps.persistant[PERS_DEFEND_COUNT], 
 			cl->ps.persistant[PERS_ASSIST_COUNT], 
-			perfect,
+			ScoreboardPerfect( *cl ),
 			cl->ps.persistant[PERS_CAPTURES]);
 
-		if ( stringlength + j + prefix >= sizeof( string ) )
+		if ( !AppendScoreboardEntry( string, entry, prefix, j, stringlength ) ) {
 			break;
-
-		strcpy( string + stringlength, entry );
-		stringlength += j;
+		}
 	}
 
 	trap_SendServerCommand( ent-g_entities, va( "scores %i %i %i%s", i,
 		level.teamScores[TEAM_RED], level.teamScores[TEAM_BLUE],
-		string ) );
+		string.data() ) );
 }
 
 
@@ -113,20 +224,20 @@ ConcatArgs
 ==================
 */
 char *ConcatArgs( int start ) {
-	static char line[MAX_STRING_CHARS];
-	char	arg[MAX_STRING_CHARS];
+	static std::array<char, MAX_STRING_CHARS> line{};
+	std::array<char, MAX_STRING_CHARS> arg{};
 	int		i, c, tlen;
 	int		len;
 
 	len = 0;
 	c = trap_Argc();
 	for ( i = start ; i < c ; i++ ) {
-		trap_Argv( i, arg, sizeof( arg ) );
-		tlen = (int)strlen( arg );
-		if ( len + tlen >= sizeof( line )-1 ) {
+		trap_Argv( i, arg.data(), arg.size() );
+		tlen = static_cast<int>( strlen( arg.data() ) );
+		if ( len + tlen >= static_cast<int>( line.size() ) - 1 ) {
 			break;
 		}
-		memcpy( line + len, arg, tlen );
+		std::copy_n( arg.data(), tlen, line.data() + len );
 		len += tlen;
 		if ( i != c - 1 ) {
 			line[len] = ' ';
@@ -136,7 +247,7 @@ char *ConcatArgs( int start ) {
 
 	line[len] = '\0';
 
-	return line;
+	return line.data();
 }
 
 
@@ -157,7 +268,7 @@ void SanitizeString( const char *in, char *out ) {
 			in++;
 			continue;
 		}
-		*out = tolower( *in );
+		*out = LowercaseSanitizedChar( *in );
 		out++;
 		in++;
 	}
@@ -177,11 +288,11 @@ Returns -1 if invalid
 int ClientNumberFromString( gentity_t *to, char *s ) {
 	gclient_t	*cl;
 	int			idnum;
-	char		s2[MAX_STRING_CHARS];
-	char		n2[MAX_STRING_CHARS];
+	std::array<char, MAX_STRING_CHARS> s2{};
+	std::array<char, MAX_STRING_CHARS> n2{};
 
 	// numeric values are just slot numbers
-	if (s[0] >= '0' && s[0] <= '9') {
+	if ( std::isdigit( static_cast<unsigned char>( s[0] ) ) ) {
 		idnum = atoi( s );
 		if ( (unsigned) idnum >= (unsigned)level.maxclients ) {
 			trap_SendServerCommand( to-g_entities, va("print \"Bad client slot: %i\n\"", idnum));
@@ -197,13 +308,13 @@ int ClientNumberFromString( gentity_t *to, char *s ) {
 	}
 
 	// check for a name match
-	SanitizeString( s, s2 );
+	SanitizeString( s, s2.data() );
 	for ( idnum=0,cl=level.clients ; idnum < level.maxclients ; idnum++,cl++ ) {
 		if ( cl->pers.connected != CON_CONNECTED ) {
 			continue;
 		}
-		SanitizeString( cl->pers.netname, n2 );
-		if ( !strcmp( n2, s2 ) ) {
+		SanitizeString( cl->pers.netname, n2.data() );
+		if ( !strcmp( n2.data(), s2.data() ) ) {
 			return idnum;
 		}
 	}
@@ -227,7 +338,7 @@ void Cmd_Give_f( gentity_t *ent )
 	int			i;
 	qboolean	give_all;
 	gentity_t	*it_ent;
-	trace_t		trace;
+	trace_t		trace{};
 
 	if ( !CheatsOk( ent ) ) {
 		return;
@@ -305,7 +416,6 @@ void Cmd_Give_f( gentity_t *ent )
 		it_ent->classname = it->classname;
 		G_SpawnItem (it_ent, it);
 		FinishSpawningItem(it_ent );
-		memset( &trace, 0, sizeof( trace ) );
 		Touch_Item (it_ent, ent, &trace);
 		if (it_ent->inuse) {
 			G_FreeEntity( it_ent );
@@ -1279,22 +1389,6 @@ void Cmd_Where_f( gentity_t *ent ) {
 	trap_SendServerCommand( ent-g_entities, va("print \"%s\n\"", vtos( ent->s.origin ) ) );
 }
 
-static const char *voteCommands[] = {
-	"map_restart",
-	"map",
-	"rotate",
-	"nextmap",
-	"kick",
-	"clientkick",
-	"g_gametype",
-	"g_unlagged",
-	"g_warmup",
-	"timelimit",
-	"fraglimit",
-	"capturelimit"
-};
-
-
 /*
 ==================
 ValidVoteCommand
@@ -1304,10 +1398,8 @@ Input string can be modified by overwriting gametype number instead of text valu
 */
 static qboolean ValidVoteCommand( int clientNum, char *command ) 
 {
-	char buf[ MAX_CVAR_VALUE_STRING ];
+	std::array<char, MAX_CVAR_VALUE_STRING> commandName{};
 	char *base;
-	char *s;
-	int	i;
 
 	if ( strchr( command, ';' ) || strchr( command, '\n' ) || strchr( command, '\r' ) )
 	{
@@ -1316,55 +1408,24 @@ static qboolean ValidVoteCommand( int clientNum, char *command )
 	}
 
 	base = command;
-	
-	s = buf; // extract command name
-	while ( *command != '\0' && *command != ' ' ) {
-		*s = *command; s++; command++;
-	}
-	*s = '\0';
-	// point cmd on first argument
-	while ( *command == ' ' || *command == '\t' )
-		command++;
-
-	for ( i = 0; i < ARRAY_LEN( voteCommands ); i++ ) {
-		if ( !Q_stricmp( buf, voteCommands[i] ) ) {
-			break;
-		}
-	}
-
-	if ( i == ARRAY_LEN( voteCommands ) ) {
-		trap_SendServerCommand( clientNum, "print \"Invalid vote command.\nVote commands are: \n"
-			" g_gametype <n|ffa|duel|tdm|ctf>\n"
-			" map_restart, map <mapname>, rotate [round], nextmap\n"
-			" kick <player>, clientkick <clientnum>\n"
-			" g_unlagged <0|1>, g_warmup <-1|0|seconds>\n"
-			" timelimit <time>, fraglimit <frags>, capturelimit <captures>.\n\"" );
+	if ( !ExtractVoteCommandName( command, commandName ) ) {
+		trap_SendServerCommand( clientNum, InvalidVoteCommandMessage );
 		return qfalse;
 	}
 
-	if ( Q_stricmp( buf, "g_gametype" ) == 0 )
-	{
-		if ( !Q_stricmp( command, "ffa" ) ) i = GT_FFA;
-		else if ( !Q_stricmp( command, "duel" ) ) i = GT_TOURNAMENT;
-		else if ( !Q_stricmp( command, "tdm" ) ) i = GT_TEAM;
-		else if ( !Q_stricmp( command, "ctf" ) ) i = GT_CTF;
-		else 
-		{
-			i = atoi( command );
-			if( i == GT_SINGLE_PLAYER || i < GT_FFA || i >= GT_MAX_GAME_TYPE ) {
-				trap_SendServerCommand( clientNum, va( "print \"Invalid gametype %i.\n\"", i ) );
-				return qfalse;
-			}
-			return qfalse;
-		}
-
-		// handle string values
-		BG_sprintf( base, "g_gametype %i", i );
-
-		return qtrue;
+	if ( std::none_of( VoteCommands.begin(), VoteCommands.end(), [&commandName]( const char *voteCommand ) {
+		return !Q_stricmp( commandName.data(), voteCommand );
+	} ) ) {
+		trap_SendServerCommand( clientNum, InvalidVoteCommandMessage );
+		return qfalse;
 	}
 
-	if ( Q_stricmp( buf, "map" ) == 0 ) {
+	if ( Q_stricmp( commandName.data(), "g_gametype" ) == 0 )
+	{
+		return Q_FromBool( NormalizeGametypeVote( clientNum, base, command ) );
+	}
+
+	if ( Q_stricmp( commandName.data(), "map" ) == 0 ) {
 		if ( !G_MapExist( command ) ) {
 			trap_SendServerCommand( clientNum, va( "print \"No such map on server: %s.\n\"", command ) );
 			return qfalse;
@@ -1372,8 +1433,8 @@ static qboolean ValidVoteCommand( int clientNum, char *command )
 		return qtrue;
 	}
 
-	if ( Q_stricmp( buf, "nextmap" ) == 0 ) {
-		strcpy( base, "rotate" );
+	if ( Q_stricmp( commandName.data(), "nextmap" ) == 0 ) {
+		Q_strcpy( base, "rotate" );
 	}
 
 	return qtrue;
@@ -1387,8 +1448,9 @@ Cmd_CallVote_f
 */
 void Cmd_CallVote_f( gentity_t *ent ) {
 	int		i, n;
-	char	arg[MAX_STRING_TOKENS], *argn[4];
-	char	cmd[MAX_STRING_TOKENS], *s;
+	std::array<char, MAX_STRING_TOKENS> arg{};
+	std::array<char *, 4> argn{};
+	std::array<char, MAX_STRING_TOKENS> cmd{};
 
 	if ( !g_allowVote.integer ) {
 		trap_SendServerCommand( ent-g_entities, "print \"Voting not allowed here.\n\"" );
@@ -1416,16 +1478,10 @@ void Cmd_CallVote_f( gentity_t *ent ) {
 	}
 
 	// build command buffer
-	arg[ 0 ] = '\0'; s = arg;
-	for ( i = 1; i < trap_Argc(); i++ ) {
-		if ( arg[ 0 ] )
-			s = Q_stradd( s, " " );
-		trap_Argv( i, cmd, sizeof( cmd ) );
-		s = Q_stradd( s, cmd );
-	}
+	BuildCallVoteCommandBuffer( arg, trap_Argc() );
 
 	// split by ';' seperators
-	n = Com_Split( arg, argn, ARRAY_LEN( argn ), ';' );
+	n = Com_Split( arg.data(), argn.data(), static_cast<int>( argn.size() ), ';' );
 	if ( n == 0 || *argn[0] == '\0' ) 
 		return; // empty callvote command?
 
@@ -1437,17 +1493,12 @@ void Cmd_CallVote_f( gentity_t *ent ) {
 	}
 
 	// rebuild command buffer
-	cmd[0] = '\0';
-	for ( s = cmd, i = 0; i < n; i++ ) {
-		if ( cmd[0] )
-			s = Q_stradd( s, ";" );
-		s = Q_stradd( s, argn[ i ] );
-	}
+	RebuildCallVoteCommandBuffer( cmd, std::span<char *>{ argn.data(), static_cast<std::size_t>( n ) } );
 
-	Com_sprintf( level.voteString, sizeof( level.voteString ), cmd );
+	Com_sprintf( level.voteString, sizeof( level.voteString ), cmd.data() );
 	Com_sprintf( level.voteDisplayString, sizeof( level.voteDisplayString ), "%s", level.voteString );
 
-	trap_SendServerCommand( -1, va( "print \"%s called a vote(%s).\n\"", ent->client->pers.netname, cmd ) );
+	trap_SendServerCommand( -1, va( "print \"%s called a vote(%s).\n\"", ent->client->pers.netname, cmd.data() ) );
 
 	// start the voting, the caller automatically votes yes
 	level.voteTime = level.time;

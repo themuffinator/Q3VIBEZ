@@ -2,6 +2,8 @@
 //
 #include "ui_local.h"
 
+#include <array>
+
 #define ART_FRAMEL			"menu/art/frame2_l"
 #define ART_FRAMER			"menu/art/frame1_r"
 #define ART_MODEL0			"menu/art/model_0"
@@ -50,6 +52,26 @@ typedef struct {
 } playersettings_t;
 
 static playersettings_t	s_playersettings;
+
+namespace {
+
+void ResetPlayerSettingsColor() {
+	UI_SetColor( nullptr );
+}
+
+void SetDefaultPreviewViewAngles( vec3_t viewangles ) {
+	viewangles[YAW] = 180 - 30;
+	viewangles[PITCH] = 0;
+	viewangles[ROLL] = 0;
+}
+
+void RefreshPlayerPreview( playerInfo_t &playerInfo ) {
+	vec3_t viewangles;
+	SetDefaultPreviewViewAngles( viewangles );
+	UI_PlayerInfo_SetInfo( &playerInfo, LEGS_IDLE, TORSO_STAND, viewangles, vec3_origin, WP_MACHINEGUN, qfalse );
+}
+
+} // namespace
 
 static const char *handicap_items[] = {
 	"None",
@@ -207,7 +229,7 @@ static void PlayerSettings_DrawEffects( void *self ) {
 	colors[3] = 1.0;
 	UI_SetColor( colors );
 	UI_DrawHandlePic( item->generic.x + 64 + item->curvalue * 16 + 8, item->generic.y + PROP_HEIGHT + 6, 16, 12, s_playersettings.fxPic );
-	UI_SetColor( NULL );
+	ResetPlayerSettingsColor();
 }
 
 
@@ -218,18 +240,13 @@ PlayerSettings_DrawPlayer
 */
 static void PlayerSettings_DrawPlayer( void *self ) {
 	menubitmap_s	*b;
-	vec3_t			viewangles;
-	char			buf[MAX_QPATH];
+	std::array<char, MAX_QPATH> modelBuffer{};
 
-	trap_Cvar_VariableStringBuffer( "model", buf, sizeof( buf ) );
-	if ( strcmp( buf, s_playersettings.playerModel ) != 0 ) {
-		UI_PlayerInfo_SetModel( &s_playersettings.playerinfo, buf );
-		strcpy( s_playersettings.playerModel, buf );
-
-		viewangles[YAW]   = 180 - 30;
-		viewangles[PITCH] = 0;
-		viewangles[ROLL]  = 0;
-		UI_PlayerInfo_SetInfo( &s_playersettings.playerinfo, LEGS_IDLE, TORSO_STAND, viewangles, vec3_origin, WP_MACHINEGUN, qfalse );
+	trap_Cvar_VariableStringBuffer( "model", modelBuffer.data(), static_cast<int>( modelBuffer.size() ) );
+	if ( strcmp( modelBuffer.data(), s_playersettings.playerModel ) != 0 ) {
+		UI_PlayerInfo_SetModel( &s_playersettings.playerinfo, modelBuffer.data() );
+		Q_strncpyz( s_playersettings.playerModel, modelBuffer.data(), sizeof( s_playersettings.playerModel ) );
+		RefreshPlayerPreview( s_playersettings.playerinfo );
 	}
 
 	b = (menubitmap_s*) self;
@@ -273,7 +290,6 @@ PlayerSettings_SetMenuItems
 =================
 */
 static void PlayerSettings_SetMenuItems( void ) {
-	vec3_t	viewangles;
 	int		c;
 	int		h;
 
@@ -288,14 +304,10 @@ static void PlayerSettings_SetMenuItems( void ) {
 	s_playersettings.effects.curvalue = c;
 
 	// model/skin
-	memset( &s_playersettings.playerinfo, 0, sizeof(playerInfo_t) );
-	
-	viewangles[YAW]   = 180 - 30;
-	viewangles[PITCH] = 0;
-	viewangles[ROLL]  = 0;
+	s_playersettings.playerinfo = playerInfo_t{};
 
 	UI_PlayerInfo_SetModel( &s_playersettings.playerinfo, UI_Cvar_VariableString( "model" ) );
-	UI_PlayerInfo_SetInfo( &s_playersettings.playerinfo, LEGS_IDLE, TORSO_STAND, viewangles, vec3_origin, WP_MACHINEGUN, qfalse );
+	RefreshPlayerPreview( s_playersettings.playerinfo );
 
 	// handicap
 	h = Com_Clamp( 5, 100, trap_Cvar_VariableValue("handicap") );
@@ -339,7 +351,7 @@ PlayerSettings_MenuInit
 static void PlayerSettings_MenuInit( void ) {
 	int		y;
 
-	memset(&s_playersettings,0,sizeof(playersettings_t));
+	s_playersettings = playersettings_t{};
 
 	PlayerSettings_Cache();
 

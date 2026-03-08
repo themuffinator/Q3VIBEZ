@@ -11,6 +11,9 @@ ADD BOTS MENU
 
 #include "ui_local.h"
 
+#include <algorithm>
+#include <array>
+
 
 #define ART_BACK0			"menu/art/back_0"
 #define ART_BACK1			"menu/art/back_1"	
@@ -36,6 +39,7 @@ ADD BOTS MENU
 #define ID_BOTNAME5			25
 #define ID_BOTNAME6			26
 
+constexpr int MaxVisibleBots = 7;
 
 typedef struct {
 	menuframework_s	menu;
@@ -53,10 +57,25 @@ typedef struct {
 	int				baseBotNum;
 	int				selectedBotNum;
 	int				sortedBotNums[MAX_BOTS];
-	char			botnames[7][32];
+	std::array<std::array<char, 32>, MaxVisibleBots> botnames;
 } addBotsMenuInfo_t;
 
 static addBotsMenuInfo_t	addBotsMenuInfo;
+
+namespace {
+
+int VisibleBotCount() {
+	return std::min( addBotsMenuInfo.numBots, MaxVisibleBots );
+}
+
+bool BotSortLess( const int left, const int right ) {
+	const char *left_info = UI_GetBotInfoByNumber( left );
+	const char *right_info = UI_GetBotInfoByNumber( right );
+
+	return Q_stricmp( Info_ValueForKey( left_info, "name" ), Info_ValueForKey( right_info, "name" ) ) < 0;
+}
+
+} // namespace
 
 
 /*
@@ -76,7 +95,7 @@ static void UI_AddBotsMenu_FightEvent( void* ptr, int event ) {
 	skill = addBotsMenuInfo.skill.curvalue + 1;
 
 	trap_Cmd_ExecuteText( EXEC_APPEND, va("addbot %s %i %s %i\n",
-		addBotsMenuInfo.botnames[addBotsMenuInfo.selectedBotNum], skill, team, addBotsMenuInfo.delay) );
+		addBotsMenuInfo.botnames[addBotsMenuInfo.selectedBotNum].data(), skill, team, addBotsMenuInfo.delay) );
 
 	addBotsMenuInfo.delay += 1500;
 }
@@ -117,14 +136,19 @@ UI_AddBotsMenu_SetBotNames
 =================
 */
 static void UI_AddBotsMenu_SetBotNames( void ) {
-	int			n;
-	const char	*info;
+	for ( int index = 0; index < MaxVisibleBots; ++index ) {
+		const int bot_index = addBotsMenuInfo.baseBotNum + index;
+		if ( bot_index < addBotsMenuInfo.numBots ) {
+			const char *info = UI_GetBotInfoByNumber( addBotsMenuInfo.sortedBotNums[bot_index] );
+			Q_strncpyz(
+				addBotsMenuInfo.botnames[index].data(),
+				Info_ValueForKey( info, "name" ),
+				addBotsMenuInfo.botnames[index].size() );
+			continue;
+		}
 
-	for ( n = 0; n < 7; n++ ) {
-		info = UI_GetBotInfoByNumber( addBotsMenuInfo.sortedBotNums[addBotsMenuInfo.baseBotNum + n] );
-		Q_strncpyz( addBotsMenuInfo.botnames[n], Info_ValueForKey( info, "name" ), sizeof(addBotsMenuInfo.botnames[n]) );
+		addBotsMenuInfo.botnames[index][0] = '\0';
 	}
-
 }
 
 
@@ -155,44 +179,23 @@ static void UI_AddBotsMenu_DownEvent( void* ptr, int event ) {
 		return;
 	}
 
-	if( addBotsMenuInfo.baseBotNum + 7 < addBotsMenuInfo.numBots ) {
+	if( addBotsMenuInfo.baseBotNum + MaxVisibleBots < addBotsMenuInfo.numBots ) {
 		addBotsMenuInfo.baseBotNum++;
 		UI_AddBotsMenu_SetBotNames();
 	}
 }
 
 
-/*
-=================
-UI_AddBotsMenu_GetSortedBotNums
-=================
-*/
-static int QDECL UI_AddBotsMenu_SortCompare( const void *arg1, const void *arg2 ) {
-	int			num1, num2;
-	const char	*info1, *info2;
-	const char	*name1, *name2;
-
-	num1 = *(int *)arg1;
-	num2 = *(int *)arg2;
-
-	info1 = UI_GetBotInfoByNumber( num1 );
-	info2 = UI_GetBotInfoByNumber( num2 );
-
-	name1 = Info_ValueForKey( info1, "name" );
-	name2 = Info_ValueForKey( info2, "name" );
-
-	return Q_stricmp( name1, name2 );
-}
-
 static void UI_AddBotsMenu_GetSortedBotNums( void ) {
-	int		n;
-
 	// initialize the array
-	for( n = 0; n < addBotsMenuInfo.numBots; n++ ) {
-		addBotsMenuInfo.sortedBotNums[n] = n;
+	for( int bot_index = 0; bot_index < addBotsMenuInfo.numBots; ++bot_index ) {
+		addBotsMenuInfo.sortedBotNums[bot_index] = bot_index;
 	}
 
-	qsort( addBotsMenuInfo.sortedBotNums, addBotsMenuInfo.numBots, sizeof(addBotsMenuInfo.sortedBotNums[0]), UI_AddBotsMenu_SortCompare );
+	std::sort(
+		addBotsMenuInfo.sortedBotNums,
+		addBotsMenuInfo.sortedBotNums + addBotsMenuInfo.numBots,
+		BotSortLess );
 }
 
 
@@ -221,18 +224,18 @@ static const char *skillNames[] = {
 	"Hurt Me Plenty",
 	"Hardcore",
 	"Nightmare!",
-	0
+	nullptr
 };
 
 static const char *teamNames1[] = {
 	"Free",
-	0
+	nullptr
 };
 
 static const char *teamNames2[] = {
 	"Red",
 	"Blue",
-	0
+	nullptr
 };
 
 static void UI_AddBotsMenu_Init( void ) {
@@ -245,7 +248,7 @@ static void UI_AddBotsMenu_Init( void ) {
 	//gametype = atoi( Info_ValueForKey( info,"g_gametype" ) );
 	gametype = trap_Cvar_VariableValue( "ui_gametype" );
 
-	memset( &addBotsMenuInfo, 0, sizeof( addBotsMenuInfo ) );
+	addBotsMenuInfo = {};
 	addBotsMenuInfo.menu.draw = UI_AddBotsMenu_Draw;
 	addBotsMenuInfo.menu.fullscreen = qfalse;
 	addBotsMenuInfo.menu.wrapAround = qtrue;
@@ -254,7 +257,7 @@ static void UI_AddBotsMenu_Init( void ) {
 	UI_AddBots_Cache();
 
 	addBotsMenuInfo.numBots = UI_GetNumBots();
-	count = addBotsMenuInfo.numBots < 7 ? addBotsMenuInfo.numBots : 7;
+	count = VisibleBotCount();
 
 	addBotsMenuInfo.arrows.generic.type  = MTYPE_BITMAP;
 	addBotsMenuInfo.arrows.generic.name  = ART_ARROWS;
@@ -291,7 +294,7 @@ static void UI_AddBotsMenu_Init( void ) {
 		addBotsMenuInfo.bots[n].generic.x			= 320 - 56;
 		addBotsMenuInfo.bots[n].generic.y			= y;
 		addBotsMenuInfo.bots[n].generic.callback	= UI_AddBotsMenu_BotEvent;
-		addBotsMenuInfo.bots[n].string				= addBotsMenuInfo.botnames[n];
+		addBotsMenuInfo.bots[n].string				= addBotsMenuInfo.botnames[n].data();
 		addBotsMenuInfo.bots[n].color				= color_orange;
 		addBotsMenuInfo.bots[n].style				= UI_LEFT|UI_SMALLFONT;
 	}

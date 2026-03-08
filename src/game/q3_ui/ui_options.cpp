@@ -38,6 +38,14 @@ typedef struct {
 
 static optionsmenu_t	s_options;
 
+namespace {
+
+qboolean OptionsMenuFullscreen( const uiClientState_t &clientState ) {
+	return clientState.connState < CA_CONNECTED;
+}
+
+}
+
 
 /*
 =================
@@ -94,18 +102,13 @@ void Options_MenuInit( void ) {
 	int				y;
 	uiClientState_t	cstate;
 
-	memset( &s_options, 0, sizeof(optionsmenu_t) );
+	s_options = {};
 
 	SystemConfig_Cache();
 	s_options.menu.wrapAround = qtrue;
 
 	trap_GetClientState( &cstate );
-	if ( cstate.connState >= CA_CONNECTED ) {
-		s_options.menu.fullscreen = qfalse;
-	}
-	else {
-		s_options.menu.fullscreen = qtrue;
-	}
+	s_options.menu.fullscreen = OptionsMenuFullscreen( cstate );
 
 	s_options.banner.generic.type	= MTYPE_BTEXT;
 	s_options.banner.generic.flags	= QMF_CENTER_JUSTIFY;

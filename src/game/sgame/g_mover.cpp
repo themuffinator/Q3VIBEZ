@@ -3,6 +3,10 @@
 
 #include "g_local.h"
 
+#include <array>
+
+void G_ExplodeMissile( gentity_t *ent );
+
 
 
 /*
@@ -19,7 +23,66 @@ typedef struct {
 	vec3_t	angles;
 	float	deltayaw;
 } pushed_t;
-pushed_t	pushed[MAX_GENTITIES], *pushed_p;
+std::array<pushed_t, MAX_GENTITIES> pushed{};
+pushed_t	*pushed_p;
+
+namespace {
+
+[[nodiscard]] int EntityPositionMask( const gentity_t &entity ) noexcept {
+	return entity.clipmask ? entity.clipmask : MASK_SOLID;
+}
+
+void TraceEntityPosition( trace_t &trace, const gentity_t &entity, const int mask ) {
+	if ( entity.client ) {
+		trap_Trace( &trace, entity.client->ps.origin, entity.r.mins, entity.r.maxs, entity.client->ps.origin, entity.s.number, mask );
+		return;
+	}
+
+	trap_Trace( &trace, entity.s.pos.trBase, entity.r.mins, entity.r.maxs, entity.s.pos.trBase, entity.s.number, mask );
+}
+
+void SavePushedEntityState( gentity_t &entity ) {
+	if ( pushed_p >= pushed.data() + pushed.size() ) {
+		G_Error( "pushed_p > &pushed[MAX_GENTITIES]" );
+	}
+
+	pushed_p->ent = &entity;
+	VectorCopy( entity.s.pos.trBase, pushed_p->origin );
+	VectorCopy( entity.s.apos.trBase, pushed_p->angles );
+	if ( entity.client ) {
+		pushed_p->deltayaw = entity.client->ps.delta_angles[YAW];
+		VectorCopy( entity.client->ps.origin, pushed_p->origin );
+	}
+	++pushed_p;
+}
+
+void RestorePushedEntityState( const pushed_t &state ) {
+	VectorCopy( state.origin, state.ent->s.pos.trBase );
+	VectorCopy( state.angles, state.ent->s.apos.trBase );
+	if ( state.ent->client ) {
+		state.ent->client->ps.delta_angles[YAW] = state.deltayaw;
+		VectorCopy( state.origin, state.ent->client->ps.origin );
+	}
+	trap_LinkEntity( state.ent );
+}
+
+#ifdef MISSIONPACK
+void FreeEntityActivator( gentity_t &entity ) {
+	if ( entity.activator ) {
+		G_FreeEntity( entity.activator );
+		entity.activator = nullptr;
+	}
+}
+
+void ExplodeProxMine( gentity_t &mine ) {
+	mine.s.loopSound = 0;
+	G_AddEvent( &mine, EV_PROXIMITY_MINE_TRIGGER, 0 );
+	G_ExplodeMissile( &mine );
+	FreeEntityActivator( mine );
+}
+#endif
+
+} // namespace
 
 
 /*
@@ -30,23 +93,12 @@ G_TestEntityPosition
 */
 gentity_t	*G_TestEntityPosition( gentity_t *ent ) {
 	trace_t	tr;
-	int		mask;
-
-	if ( ent->clipmask ) {
-		mask = ent->clipmask;
-	} else {
-		mask = MASK_SOLID;
-	}
-	if ( ent->client ) {
-		trap_Trace( &tr, ent->client->ps.origin, ent->r.mins, ent->r.maxs, ent->client->ps.origin, ent->s.number, mask );
-	} else {
-		trap_Trace( &tr, ent->s.pos.trBase, ent->r.mins, ent->r.maxs, ent->s.pos.trBase, ent->s.number, mask );
-	}
+	TraceEntityPosition( tr, *ent, EntityPositionMask( *ent ) );
 	
 	if (tr.startsolid)
 		return &g_entities[ tr.entityNum ];
 		
-	return NULL;
+	return nullptr;
 }
 
 /*
@@ -107,17 +159,7 @@ qboolean	G_TryPushingEntity( gentity_t *check, gentity_t *pusher, vec3_t move, v
 	}
 
 	// save off the old position
-	if (pushed_p > &pushed[MAX_GENTITIES]) {
-		G_Error( "pushed_p > &pushed[MAX_GENTITIES]" );
-	}
-	pushed_p->ent = check;
-	VectorCopy (check->s.pos.trBase, pushed_p->origin);
-	VectorCopy (check->s.apos.trBase, pushed_p->angles);
-	if ( check->client ) {
-		pushed_p->deltayaw = check->client->ps.delta_angles[YAW];
-		VectorCopy (check->client->ps.origin, pushed_p->origin);
-	}
-	pushed_p++;
+	SavePushedEntityState( *check );
 
 	// try moving the contacted entity 
 	// figure movement due to the pusher's amove
@@ -189,7 +231,7 @@ qboolean G_CheckProxMinePosition( gentity_t *check ) {
 
 	VectorMA(check->s.pos.trBase, 0.125, check->movedir, start);
 	VectorMA(check->s.pos.trBase, 2, check->movedir, end);
-	trap_Trace( &tr, start, NULL, NULL, end, check->s.number, MASK_SOLID );
+	trap_Trace( &tr, start, nullptr, nullptr, end, check->s.number, MASK_SOLID );
 	
 	if (tr.startsolid || tr.fraction < 1)
 		return qfalse;
@@ -230,8 +272,6 @@ qboolean G_TryPushingProxMine( gentity_t *check, gentity_t *pusher, vec3_t move,
 	return ret;
 }
 
-void G_ExplodeMissile( gentity_t *ent );
-
 /*
 ============
 G_MoverPush
@@ -246,11 +286,11 @@ qboolean G_MoverPush( gentity_t *pusher, vec3_t move, vec3_t amove, gentity_t **
 	gentity_t	*check;
 	vec3_t		mins, maxs;
 	pushed_t	*p;
-	int			entityList[MAX_GENTITIES];
+	std::array<int, MAX_GENTITIES> entityList{};
 	int			listedEntities;
 	vec3_t		totalMins, totalMaxs;
 
-	*obstacle = NULL;
+	*obstacle = nullptr;
 
 
 	// mins/maxs are the bounds at the destination
@@ -286,7 +326,7 @@ qboolean G_MoverPush( gentity_t *pusher, vec3_t move, vec3_t amove, gentity_t **
 	// unlink the pusher so we don't get it in the entityList
 	trap_UnlinkEntity( pusher );
 
-	listedEntities = trap_EntitiesInBox( totalMins, totalMaxs, entityList, MAX_GENTITIES );
+	listedEntities = trap_EntitiesInBox( totalMins, totalMaxs, entityList.data(), static_cast<int>( entityList.size() ) );
 
 	// move the pusher to its final position
 	VectorAdd( pusher->r.currentOrigin, move, pusher->r.currentOrigin );
@@ -304,28 +344,14 @@ qboolean G_MoverPush( gentity_t *pusher, vec3_t move, vec3_t amove, gentity_t **
 				// if this prox mine is attached to this mover try to move it with the pusher
 				if ( check->enemy == pusher ) {
 					if (!G_TryPushingProxMine( check, pusher, move, amove )) {
-						//explode
-						check->s.loopSound = 0;
-						G_AddEvent( check, EV_PROXIMITY_MINE_TRIGGER, 0 );
-						G_ExplodeMissile(check);
-						if (check->activator) {
-							G_FreeEntity(check->activator);
-							check->activator = NULL;
-						}
+						ExplodeProxMine( *check );
 						//G_Printf("prox mine explodes\n");
 					}
 				}
 				else {
 					//check if the prox mine is crushed by the mover
 					if (!G_CheckProxMinePosition( check )) {
-						//explode
-						check->s.loopSound = 0;
-						G_AddEvent( check, EV_PROXIMITY_MINE_TRIGGER, 0 );
-						G_ExplodeMissile(check);
-						if (check->activator) {
-							G_FreeEntity(check->activator);
-							check->activator = NULL;
-						}
+						ExplodeProxMine( *check );
 						//G_Printf("prox mine explodes\n");
 					}
 				}
@@ -365,7 +391,7 @@ qboolean G_MoverPush( gentity_t *pusher, vec3_t move, vec3_t amove, gentity_t **
 
 		// bobbing entities are instant-kill and never get blocked
 		if ( pusher->s.pos.trType == TR_SINE || pusher->s.apos.trType == TR_SINE ) {
-			G_Damage( check, pusher, pusher, NULL, NULL, 99999, 0, MOD_CRUSH );
+			G_Damage( check, pusher, pusher, nullptr, nullptr, 99999, 0, MOD_CRUSH );
 			continue;
 		}
 
@@ -376,14 +402,8 @@ qboolean G_MoverPush( gentity_t *pusher, vec3_t move, vec3_t amove, gentity_t **
 		// move back any entities we already moved
 		// go backwards, so if the same entity was pushed
 		// twice, it goes back to the original position
-		for ( p=pushed_p-1 ; p>=pushed ; p-- ) {
-			VectorCopy (p->origin, p->ent->s.pos.trBase);
-			VectorCopy (p->angles, p->ent->s.apos.trBase);
-			if ( p->ent->client ) {
-				p->ent->client->ps.delta_angles[YAW] = p->deltayaw;
-				VectorCopy (p->origin, p->ent->client->ps.origin);
-			}
-			trap_LinkEntity (p->ent);
+		for ( p = pushed_p; p-- > pushed.data(); ) {
+			RestorePushedEntityState( *p );
 		}
 		return qfalse;
 	}
@@ -402,12 +422,12 @@ void G_MoverTeam( gentity_t *ent ) {
 	gentity_t	*part, *obstacle;
 	vec3_t		origin, angles;
 
-	obstacle = NULL;
+	obstacle = nullptr;
 
 	// make sure all team slaves can move before commiting
 	// any moves or calling any think functions
 	// if the move is blocked, all moved objects will be backed out
-	pushed_p = pushed;
+	pushed_p = pushed.data();
 	for (part = ent ; part ; part=part->teamchain) {
 		// get current position
 		BG_EvaluateTrajectory( &part->s.pos, level.time, origin );

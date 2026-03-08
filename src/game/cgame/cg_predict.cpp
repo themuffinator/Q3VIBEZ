@@ -14,6 +14,14 @@ static	centity_t	*cg_solidEntities[MAX_ENTITIES_IN_SNAPSHOT];
 static	int			cg_numTriggerEntities;
 static	centity_t	*cg_triggerEntities[MAX_ENTITIES_IN_SNAPSHOT];
 
+namespace {
+
+[[nodiscard]] constexpr int NextSavedStateIndex( const int index ) noexcept {
+	return ( index + 1 ) % NUM_SAVED_STATES;
+}
+
+} // namespace
+
 /*
 ====================
 CG_BuildSolidList
@@ -659,7 +667,7 @@ static void CG_CheckTimers( void ) {
 
 static int CG_IsUnacceptableError( playerState_t *ps, playerState_t *pps, qboolean *forceMove ) {
 	vec3_t delta;
-	int i, n, v0, v1;
+	int i, v0, v1;
  
 	if ( pps->pm_time != ps->pm_time ||
 		 pps->pm_type != ps->pm_type ||
@@ -700,9 +708,9 @@ static int CG_IsUnacceptableError( playerState_t *ps, playerState_t *pps, qboole
 
 	// forward gesture animation
 	if ( pps->torsoAnim != ps->torsoAnim && (ps->torsoAnim & ~ANIM_TOGGLEBIT ) == TORSO_GESTURE ) {
-		for ( n = 0 ; n < NUM_SAVED_STATES; n++ ) {
-			cg.savedPmoveStates[ n ].torsoAnim = ps->torsoAnim;
-			cg.savedPmoveStates[ n ].torsoTimer = ps->torsoTimer;
+		for ( playerState_t &savedState : cg.savedPmoveStates ) {
+			savedState.torsoAnim = ps->torsoAnim;
+			savedState.torsoTimer = ps->torsoTimer;
 		}
 	}
 
@@ -720,8 +728,8 @@ static int CG_IsUnacceptableError( playerState_t *ps, playerState_t *pps, qboole
 	v0 = pps->eFlags & EF_NOPREDICT;
 	v1 = ps->eFlags & EF_NOPREDICT;
 	if ( v0 != v1 ) {
-		for ( i = 0 ; i < NUM_SAVED_STATES; i++ ) {
-			cg.savedPmoveStates[ i ].eFlags = (cg.savedPmoveStates[ i ].eFlags & ~EF_NOPREDICT) | v1 ;
+		for ( playerState_t &savedState : cg.savedPmoveStates ) {
+			savedState.eFlags = ( savedState.eFlags & ~EF_NOPREDICT ) | v1;
 		}
 		pps->eFlags = (pps->eFlags & ~EF_NOPREDICT) | v1;
 	}
@@ -785,8 +793,8 @@ static int CG_IsUnacceptableError( playerState_t *ps, playerState_t *pps, qboole
 	// health countdown?
 	if ( pps->stats[ STAT_HEALTH ] == ps->stats[ STAT_HEALTH ] + 1 && ps->stats[ STAT_HEALTH ] >= ps->stats[ STAT_MAX_HEALTH ] ) {
 		cg.timeResidual = ps->commandTime + 1000;
-		for ( n = 0 ; n < NUM_SAVED_STATES; n++ ) {
-			cg.savedPmoveStates[ n ].stats[ STAT_HEALTH ] = ps->stats[ STAT_HEALTH ];
+		for ( playerState_t &savedState : cg.savedPmoveStates ) {
+			savedState.stats[STAT_HEALTH] = ps->stats[STAT_HEALTH];
 		}
 
 	}
@@ -794,16 +802,16 @@ static int CG_IsUnacceptableError( playerState_t *ps, playerState_t *pps, qboole
 	if ( pps->stats[ STAT_ARMOR ] == ps->stats[ STAT_ARMOR ] - 1 && ps->stats[ STAT_ARMOR ] >= ps->stats[ STAT_MAX_HEALTH ] ) {
 		// we may need few frames to sync with client->timeResidual on server side
 		cg.timeResidual = ps->commandTime + 1000;
-		for ( n = 0 ; n < NUM_SAVED_STATES; n++ ) {
-			cg.savedPmoveStates[ n ].stats[ STAT_ARMOR ] = ps->stats[ STAT_ARMOR ];
+		for ( playerState_t &savedState : cg.savedPmoveStates ) {
+			savedState.stats[STAT_ARMOR] = ps->stats[STAT_ARMOR];
 		}
 	}
 
 	for( i = 0; i < MAX_STATS; i++ ) {
 		// we can't predict some flags
 		if ( i == STAT_CLIENTS_READY /*|| i == STAT_MAX_HEALTH */ ) {
-			for ( n = 0 ; n < NUM_SAVED_STATES; n++ ) {
-				cg.savedPmoveStates[ n ].stats[ i ] = ps->stats[ i ];
+			for ( playerState_t &savedState : cg.savedPmoveStates ) {
+				savedState.stats[i] = ps->stats[i];
 			}
 			continue;
 		}
@@ -826,8 +834,8 @@ static int CG_IsUnacceptableError( playerState_t *ps, playerState_t *pps, qboole
 				return 16;
 			}
 			v0 = ps->persistant[ i ];
-			for ( n = 0 ; n < NUM_SAVED_STATES; n++ ) {
-				cg.savedPmoveStates[ n ].persistant[ i ] = v0;
+			for ( playerState_t &savedState : cg.savedPmoveStates ) {
+				savedState.persistant[i] = v0;
 			}
 			*forceMove = qtrue;
 		}
@@ -1011,7 +1019,7 @@ void CG_PredictPlayerState( void ) {
 			qboolean error = qtrue;
 
 			// loop through the saved states queue
-			for( i = cg.stateHead; i != cg.stateTail; i = ( i + 1 ) % NUM_SAVED_STATES ) {
+			for ( i = cg.stateHead; i != cg.stateTail; i = NextSavedStateIndex( i ) ) {
 				// if we find a predicted state whose commandTime matches the snapshot
 				// player state's commandTime
 				if( cg.savedPmoveStates[ i ].commandTime != cg.predictedPlayerState.commandTime ) {
@@ -1028,7 +1036,7 @@ void CG_PredictPlayerState( void ) {
 				// this one is almost exact, so we'll copy it in as the starting point
 				*cg_pmove.ps = cg.savedPmoveStates[ i ];
 				// advance the head
-				cg.stateHead = ( i + 1 ) % NUM_SAVED_STATES;
+				cg.stateHead = NextSavedStateIndex( i );
   
 				// set the next command to predict
 				predictCmd = cg.lastPredictedCommand + 1;
@@ -1146,7 +1154,7 @@ void CG_PredictPlayerState( void ) {
 			Pmove (&cg_pmove);
 		} else 
 #endif
-		if ( /*cg_optimizePrediction.integer && */ ( cmdNum >= predictCmd || ( stateIndex + 1 ) % NUM_SAVED_STATES == cg.stateHead ) ) {
+		if ( /*cg_optimizePrediction.integer && */ ( cmdNum >= predictCmd || NextSavedStateIndex( stateIndex ) == cg.stateHead ) ) {
 
 			Pmove( &cg_pmove );
 
@@ -1160,16 +1168,16 @@ void CG_PredictPlayerState( void ) {
 			cg.lastPredictedCommand = cmdNum;
  
 			// if we haven't run out of space in the saved states queue
-			if( ( stateIndex + 1 ) % NUM_SAVED_STATES != cg.stateHead ) {
+			if ( NextSavedStateIndex( stateIndex ) != cg.stateHead ) {
 				// save the state for the false case ( of cmdNum >= predictCmd )
 				// in later calls to this function
 				cg.savedPmoveStates[ stateIndex ] = *cg_pmove.ps;
-				stateIndex = ( stateIndex + 1 ) % NUM_SAVED_STATES;
+				stateIndex = NextSavedStateIndex( stateIndex );
 				cg.stateTail = stateIndex;
 			}
 		} else {
 			*cg_pmove.ps = cg.savedPmoveStates[ stateIndex ];
-			stateIndex = ( stateIndex + 1 ) % NUM_SAVED_STATES;
+			stateIndex = NextSavedStateIndex( stateIndex );
 		}
 
 		moved = qtrue;

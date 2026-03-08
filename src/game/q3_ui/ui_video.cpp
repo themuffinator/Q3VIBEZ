@@ -2,6 +2,9 @@
 //
 #include "ui_local.h"
 
+#include <array>
+#include <span>
+
 void GraphicsOptions_MenuInit( void );
 
 /*
@@ -18,14 +21,12 @@ DRIVER INFORMATION MENU
 #define DRIVERINFO_BACK0	"menu/art/back_0"
 #define DRIVERINFO_BACK1	"menu/art/back_1"
 
-static char* driverinfo_artlist[] = 
-{
+static constexpr auto driverinfo_artlist = std::to_array<const char *>( {
 	DRIVERINFO_FRAMEL,
 	DRIVERINFO_FRAMER,
 	DRIVERINFO_BACK0,
 	DRIVERINFO_BACK1,
-	NULL,
-};
+} );
 
 #define ID_DRIVERINFOBACK	100
 
@@ -42,6 +43,47 @@ typedef struct
 } driverinfo_t;
 
 static driverinfo_t	s_driverinfo;
+
+namespace {
+
+void RegisterShaderList( std::span<const char *const> shaders ) {
+	for ( const char *const shader : shaders ) {
+		trap_R_RegisterShaderNoMip( shader );
+	}
+}
+
+void ResetDriverInfoState() {
+	s_driverinfo = {};
+}
+
+void BuildDriverExtensionList() {
+	char *extensionPtr = s_driverinfo.stringbuff;
+	while ( s_driverinfo.numstrings < 40 && *extensionPtr ) {
+		while ( *extensionPtr == ' ' ) {
+			*extensionPtr++ = '\0';
+		}
+
+		if ( *extensionPtr && *extensionPtr != ' ' ) {
+			s_driverinfo.strings[s_driverinfo.numstrings++] = extensionPtr;
+		}
+
+		while ( *extensionPtr && *extensionPtr != ' ' ) {
+			++extensionPtr;
+		}
+	}
+}
+
+void TruncateDriverExtensionStrings() {
+	for ( int i = 0; i < s_driverinfo.numstrings; ++i ) {
+		const int length = strlen( s_driverinfo.strings[i] );
+		if ( length > 32 ) {
+			s_driverinfo.strings[i][length - 1] = '>';
+			s_driverinfo.strings[i][length] = '\0';
+		}
+	}
+}
+
+} // namespace
 
 /*
 =================
@@ -101,15 +143,7 @@ DriverInfo_Cache
 */
 void DriverInfo_Cache( void )
 {
-	int	i;
-
-	// touch all our pics
-	for (i=0; ;i++)
-	{
-		if (!driverinfo_artlist[i])
-			break;
-		trap_R_RegisterShaderNoMip(driverinfo_artlist[i]);
-	}
+	RegisterShaderList( driverinfo_artlist );
 }
 
 /*
@@ -119,12 +153,8 @@ UI_DriverInfo_Menu
 */
 static void UI_DriverInfo_Menu( void )
 {
-	char*	eptr;
-	int		i;
-	int		len;
-
 	// zero set all our globals
-	memset( &s_driverinfo, 0 ,sizeof(driverinfo_t) );
+	ResetDriverInfoState();
 
 	DriverInfo_Cache();
 
@@ -171,29 +201,8 @@ static void UI_DriverInfo_Menu( void )
   // (no matter what your resolution)
   Q_strncpyz(s_driverinfo.stringbuff, uis.glconfig.extensions_string, 1024);
 
-	// build null terminated extension strings
-	eptr = s_driverinfo.stringbuff;
-	while ( s_driverinfo.numstrings<40 && *eptr )
-	{
-		while ( *eptr == ' ' )
-			*eptr++ = '\0';
-
-		// track start of valid string
-		if (*eptr && *eptr != ' ')
-			s_driverinfo.strings[s_driverinfo.numstrings++] = eptr;
-
-		while ( *eptr && *eptr != ' ' )
-			eptr++;
-	}
-
-	// safety length strings for display
-	for (i=0; i<s_driverinfo.numstrings; i++) {
-		len = strlen(s_driverinfo.strings[i]);
-		if (len > 32) {
-			s_driverinfo.strings[i][len-1] = '>';
-			s_driverinfo.strings[i][len]   = '\0';
-		}
-	}
+	BuildDriverExtensionList();
+	TruncateDriverExtensionStrings();
 
 	Menu_AddItem( &s_driverinfo.menu, &s_driverinfo.banner );
 	Menu_AddItem( &s_driverinfo.menu, &s_driverinfo.framel );
@@ -660,42 +669,36 @@ GraphicsOptions_MenuInit
 */
 void GraphicsOptions_MenuInit( void )
 {
-
-	static const char *tq_names[] =
-	{
+	static auto tq_names = std::to_array<const char *>( {
 		"Default",
 		"16 bit",
 		"32 bit",
-		NULL
-	};
+		nullptr
+	} );
 
-	static const char *s_graphics_options_names[] =
-	{
+	static auto s_graphics_options_names = std::to_array<const char *>( {
 		"High Quality",
 		"Normal",
 		"Fast",
 		"Fastest",
 		"Custom",
-		0
-	};
+		nullptr
+	} );
 
-	static const char *lighting_names[] =
-	{
+	static auto lighting_names = std::to_array<const char *>( {
 		"Lightmap",
 		"Vertex",
-		0
-	};
+		nullptr
+	} );
 
-	static const char *colordepth_names[] =
-	{
+	static auto colordepth_names = std::to_array<const char *>( {
 		"Default",
 		"16 bit",
 		"32 bit",
-		0
-	};
+		nullptr
+	} );
 
-	static const char *resolutions[] = 
-	{
+	static auto resolutions = std::to_array<const char *>( {
 		"320x240",
 		"400x300",
 		"512x384",
@@ -708,32 +711,29 @@ void GraphicsOptions_MenuInit( void )
 		"1600x1200",
 		"2048x1536",
 		"856x480 wide screen",
-		0
-	};
-	static const char *filter_names[] =
-	{
+		nullptr
+	} );
+	static auto filter_names = std::to_array<const char *>( {
 		"Bilinear",
 		"Trilinear",
-		NULL
-	};
-	static const char *quality_names[] =
-	{
+		nullptr
+	} );
+	static auto quality_names = std::to_array<const char *>( {
 		"Low",
 		"Medium",
 		"High",
-		NULL
-	};
-	static const char *enabled_names[] =
-	{
+		nullptr
+	} );
+	static auto enabled_names = std::to_array<const char *>( {
 		"Off",
 		"On",
-		NULL
-	};
+		nullptr
+	} );
 
 	int y;
 
 	// zero set all our globals
-	memset( &s_graphicsoptions, 0 ,sizeof(graphicsoptions_t) );
+	s_graphicsoptions = {};
 
 	GraphicsOptions_Cache();
 
@@ -812,7 +812,7 @@ void GraphicsOptions_MenuInit( void )
 	s_graphicsoptions.list.generic.y        = y;
 	s_graphicsoptions.list.generic.callback = GraphicsOptions_Event;
 	s_graphicsoptions.list.generic.id       = ID_LIST;
-	s_graphicsoptions.list.itemnames        = s_graphics_options_names;
+	s_graphicsoptions.list.itemnames        = s_graphics_options_names.data();
 	y += 2 * ( BIGCHAR_HEIGHT + 2 );
 
 	// references/modifies "r_allowExtensions"
@@ -821,7 +821,7 @@ void GraphicsOptions_MenuInit( void )
 	s_graphicsoptions.allow_extensions.generic.flags	= QMF_PULSEIFFOCUS|QMF_SMALLFONT;
 	s_graphicsoptions.allow_extensions.generic.x	    = 400;
 	s_graphicsoptions.allow_extensions.generic.y	    = y;
-	s_graphicsoptions.allow_extensions.itemnames        = enabled_names;
+	s_graphicsoptions.allow_extensions.itemnames        = enabled_names.data();
 	y += BIGCHAR_HEIGHT+2;
 
 	// references/modifies "r_mode"
@@ -830,7 +830,7 @@ void GraphicsOptions_MenuInit( void )
 	s_graphicsoptions.mode.generic.flags    = QMF_PULSEIFFOCUS|QMF_SMALLFONT;
 	s_graphicsoptions.mode.generic.x        = 400;
 	s_graphicsoptions.mode.generic.y        = y;
-	s_graphicsoptions.mode.itemnames        = resolutions;
+	s_graphicsoptions.mode.itemnames        = resolutions.data();
 	s_graphicsoptions.mode.generic.callback = GraphicsOptions_Event;
 	s_graphicsoptions.mode.generic.id       = ID_MODE;
 	y += BIGCHAR_HEIGHT+2;
@@ -841,7 +841,7 @@ void GraphicsOptions_MenuInit( void )
 	s_graphicsoptions.colordepth.generic.flags    = QMF_PULSEIFFOCUS|QMF_SMALLFONT;
 	s_graphicsoptions.colordepth.generic.x        = 400;
 	s_graphicsoptions.colordepth.generic.y        = y;
-	s_graphicsoptions.colordepth.itemnames        = colordepth_names;
+	s_graphicsoptions.colordepth.itemnames        = colordepth_names.data();
 	y += BIGCHAR_HEIGHT+2;
 
 	// references/modifies "r_fullscreen"
@@ -850,7 +850,7 @@ void GraphicsOptions_MenuInit( void )
 	s_graphicsoptions.fs.generic.flags	  = QMF_PULSEIFFOCUS|QMF_SMALLFONT;
 	s_graphicsoptions.fs.generic.x	      = 400;
 	s_graphicsoptions.fs.generic.y	      = y;
-	s_graphicsoptions.fs.itemnames	      = enabled_names;
+	s_graphicsoptions.fs.itemnames	      = enabled_names.data();
 	y += BIGCHAR_HEIGHT+2;
 
 	// references/modifies "r_vertexLight"
@@ -859,7 +859,7 @@ void GraphicsOptions_MenuInit( void )
 	s_graphicsoptions.lighting.generic.flags = QMF_PULSEIFFOCUS|QMF_SMALLFONT;
 	s_graphicsoptions.lighting.generic.x	 = 400;
 	s_graphicsoptions.lighting.generic.y	 = y;
-	s_graphicsoptions.lighting.itemnames     = lighting_names;
+	s_graphicsoptions.lighting.itemnames     = lighting_names.data();
 	y += BIGCHAR_HEIGHT+2;
 
 	// references/modifies "r_lodBias" & "subdivisions"
@@ -868,7 +868,7 @@ void GraphicsOptions_MenuInit( void )
 	s_graphicsoptions.geometry.generic.flags = QMF_PULSEIFFOCUS|QMF_SMALLFONT;
 	s_graphicsoptions.geometry.generic.x	 = 400;
 	s_graphicsoptions.geometry.generic.y	 = y;
-	s_graphicsoptions.geometry.itemnames     = quality_names;
+	s_graphicsoptions.geometry.itemnames     = quality_names.data();
 	y += BIGCHAR_HEIGHT+2;
 
 	// references/modifies "r_picmip"
@@ -888,7 +888,7 @@ void GraphicsOptions_MenuInit( void )
 	s_graphicsoptions.texturebits.generic.flags	= QMF_PULSEIFFOCUS|QMF_SMALLFONT;
 	s_graphicsoptions.texturebits.generic.x	    = 400;
 	s_graphicsoptions.texturebits.generic.y	    = y;
-	s_graphicsoptions.texturebits.itemnames     = tq_names;
+	s_graphicsoptions.texturebits.itemnames     = tq_names.data();
 	y += BIGCHAR_HEIGHT+2;
 
 	// references/modifies "r_textureMode"
@@ -897,7 +897,7 @@ void GraphicsOptions_MenuInit( void )
 	s_graphicsoptions.filter.generic.flags	= QMF_PULSEIFFOCUS|QMF_SMALLFONT;
 	s_graphicsoptions.filter.generic.x	    = 400;
 	s_graphicsoptions.filter.generic.y	    = y;
-	s_graphicsoptions.filter.itemnames      = filter_names;
+	s_graphicsoptions.filter.itemnames      = filter_names.data();
 	y += 2*BIGCHAR_HEIGHT;
 
 	s_graphicsoptions.driverinfo.generic.type     = MTYPE_PTEXT;
@@ -987,4 +987,3 @@ void UI_GraphicsOptionsMenu( void ) {
 	UI_PushMenu( &s_graphicsoptions.menu );
 	Menu_SetCursorToItem( &s_graphicsoptions.menu, &s_graphicsoptions.graphics );
 }
-

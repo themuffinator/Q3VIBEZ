@@ -11,6 +11,8 @@ REMOVE BOTS MENU
 
 #include "ui_local.h"
 
+#include <array>
+
 
 #define ART_BACKGROUND		"menu/art/addbotframe"
 #define ART_BACK0			"menu/art/back_0"
@@ -33,6 +35,14 @@ REMOVE BOTS MENU
 #define ID_BOTNAME5			25
 #define ID_BOTNAME6			26
 
+namespace {
+
+constexpr int MaxVisibleBots = 7;
+
+using BotName = std::array<char, 32>;
+
+}
+
 
 typedef struct {
 	menuframework_s	menu;
@@ -44,7 +54,7 @@ typedef struct {
 	menubitmap_s	up;
 	menubitmap_s	down;
 
-	menutext_s		bots[7];
+	std::array<menutext_s, MaxVisibleBots>	bots;
 
 	menubitmap_s	deleteBtn;
 	menubitmap_s	back;
@@ -52,11 +62,38 @@ typedef struct {
 	int				numBots;
 	int				baseBotNum;
 	int				selectedBotNum;
-	char			botnames[7][32];
-	int				botClientNums[MAX_BOTS];
+	std::array<BotName, MaxVisibleBots>	botnames;
+	std::array<int, MAX_BOTS>	botClientNums;
 } removeBotsMenuInfo_t;
 
 static removeBotsMenuInfo_t	removeBotsMenuInfo;
+
+namespace {
+
+int VisibleBotCount() {
+	const int remainingBots = removeBotsMenuInfo.numBots - removeBotsMenuInfo.baseBotNum;
+	if( remainingBots <= 0 ) {
+		return 0;
+	}
+
+	return remainingBots < MaxVisibleBots ? remainingBots : MaxVisibleBots;
+}
+
+std::array<char, MAX_INFO_STRING> ConfigStringBuffer() {
+	return {};
+}
+
+void ClearVisibleBotNames() {
+	for( BotName &botName : removeBotsMenuInfo.botnames ) {
+		botName[0] = '\0';
+	}
+}
+
+int SelectedBotClientNum() {
+	return removeBotsMenuInfo.botClientNums[removeBotsMenuInfo.baseBotNum + removeBotsMenuInfo.selectedBotNum];
+}
+
+}
 
 
 /*
@@ -65,15 +102,15 @@ UI_RemoveBotsMenu_SetBotNames
 =================
 */
 static void UI_RemoveBotsMenu_SetBotNames( void ) {
-	int		n;
-	char	info[MAX_INFO_STRING];
+	auto info = ConfigStringBuffer();
 
-	for ( n = 0; (n < 7) && (removeBotsMenuInfo.baseBotNum + n < removeBotsMenuInfo.numBots); n++ ) {
-		trap_GetConfigString( CS_PLAYERS + removeBotsMenuInfo.botClientNums[removeBotsMenuInfo.baseBotNum + n], info, MAX_INFO_STRING );
-		Q_strncpyz( removeBotsMenuInfo.botnames[n], Info_ValueForKey( info, "n" ), sizeof(removeBotsMenuInfo.botnames[n]) );
-		Q_CleanStr( removeBotsMenuInfo.botnames[n] );
+	ClearVisibleBotNames();
+
+	for( int n = 0; n < VisibleBotCount(); ++n ) {
+		trap_GetConfigString( CS_PLAYERS + removeBotsMenuInfo.botClientNums[removeBotsMenuInfo.baseBotNum + n], info.data(), static_cast<int>( info.size() ) );
+		Q_strncpyz( removeBotsMenuInfo.botnames[n].data(), Info_ValueForKey( info.data(), "n" ), static_cast<int>( removeBotsMenuInfo.botnames[n].size() ) );
+		Q_CleanStr( removeBotsMenuInfo.botnames[n].data() );
 	}
-
 }
 
 
@@ -87,7 +124,7 @@ static void UI_RemoveBotsMenu_DeleteEvent( void* ptr, int event ) {
 		return;
 	}
 
-	trap_Cmd_ExecuteText( EXEC_APPEND, va("clientkick %i\n", removeBotsMenuInfo.botClientNums[removeBotsMenuInfo.baseBotNum + removeBotsMenuInfo.selectedBotNum]) );
+	trap_Cmd_ExecuteText( EXEC_APPEND, va("clientkick %i\n", SelectedBotClientNum()) );
 }
 
 
@@ -147,7 +184,7 @@ static void UI_RemoveBotsMenu_DownEvent( void* ptr, int event ) {
 		return;
 	}
 
-	if( removeBotsMenuInfo.baseBotNum + 7 < removeBotsMenuInfo.numBots ) {
+	if( removeBotsMenuInfo.baseBotNum + MaxVisibleBots < removeBotsMenuInfo.numBots ) {
 		removeBotsMenuInfo.baseBotNum++;
 		UI_RemoveBotsMenu_SetBotNames();
 	}
@@ -163,16 +200,16 @@ static void UI_RemoveBotsMenu_GetBots( void ) {
 	int		numPlayers;
 	int		isBot;
 	int		n;
-	char	info[MAX_INFO_STRING];
+	auto info = ConfigStringBuffer();
 
-	trap_GetConfigString( CS_SERVERINFO, info, sizeof(info) );
-	numPlayers = atoi( Info_ValueForKey( info, "sv_maxclients" ) );
+	trap_GetConfigString( CS_SERVERINFO, info.data(), static_cast<int>( info.size() ) );
+	numPlayers = atoi( Info_ValueForKey( info.data(), "sv_maxclients" ) );
 	removeBotsMenuInfo.numBots = 0;
 
 	for( n = 0; n < numPlayers; n++ ) {
-		trap_GetConfigString( CS_PLAYERS + n, info, MAX_INFO_STRING );
+		trap_GetConfigString( CS_PLAYERS + n, info.data(), static_cast<int>( info.size() ) );
 
-		isBot = atoi( Info_ValueForKey( info, "skill" ) );
+		isBot = atoi( Info_ValueForKey( info.data(), "skill" ) );
 		if( !isBot ) {
 			continue;
 		}
@@ -207,7 +244,7 @@ static void UI_RemoveBotsMenu_Init( void ) {
 	int		count;
 	int		y;
 
-	memset( &removeBotsMenuInfo, 0 ,sizeof(removeBotsMenuInfo) );
+	removeBotsMenuInfo = {};
 	removeBotsMenuInfo.menu.fullscreen = qfalse;
 	removeBotsMenuInfo.menu.wrapAround = qtrue;
 
@@ -215,7 +252,7 @@ static void UI_RemoveBotsMenu_Init( void ) {
 
 	UI_RemoveBotsMenu_GetBots();
 	UI_RemoveBotsMenu_SetBotNames();
-	count = removeBotsMenuInfo.numBots < 7 ? removeBotsMenuInfo.numBots : 7;
+	count = VisibleBotCount();
 
 	removeBotsMenuInfo.banner.generic.type		= MTYPE_BTEXT;
 	removeBotsMenuInfo.banner.generic.x			= 320;
@@ -267,7 +304,7 @@ static void UI_RemoveBotsMenu_Init( void ) {
 		removeBotsMenuInfo.bots[n].generic.x		= 320 - 56;
 		removeBotsMenuInfo.bots[n].generic.y		= y;
 		removeBotsMenuInfo.bots[n].generic.callback	= UI_RemoveBotsMenu_BotEvent;
-		removeBotsMenuInfo.bots[n].string			= removeBotsMenuInfo.botnames[n];
+		removeBotsMenuInfo.bots[n].string			= removeBotsMenuInfo.botnames[n].data();
 		removeBotsMenuInfo.bots[n].color			= color_orange;
 		removeBotsMenuInfo.bots[n].style			= UI_LEFT|UI_SMALLFONT;
 	}
