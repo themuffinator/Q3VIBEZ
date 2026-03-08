@@ -234,3 +234,4 @@ extern sfx_t *sfxScratchPointer;
 extern int	   sfxScratchIndex;
 
 qboolean S_Base_Init( soundInterface_t *si );
+qboolean S_AL_Init( soundInterface_t *si );

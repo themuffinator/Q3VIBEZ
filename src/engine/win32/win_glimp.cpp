@@ -627,6 +627,7 @@ static qboolean GLW_CreateWindow( int width, int height, int colorbits, qboolean
 	int				exstyle;
 	qboolean		oldFullscreen;
 	qboolean		res = qfalse;
+	const qboolean	borderless = ( r_borderless && r_borderless->integer ) || ( r_noborder && r_noborder->integer );
 
 	//
 	// register the window class if necessary
@@ -687,9 +688,9 @@ static qboolean GLW_CreateWindow( int width, int height, int colorbits, qboolean
 		else
 		{
 			exstyle = WINDOW_ESTYLE_NORMAL;
-			if ( r_noborder->integer ) {
+			if ( borderless ) {
 				stylebits = WINDOW_STYLE_NORMAL_NB;
-				g_wv.borderless = r_noborder->integer;
+				g_wv.borderless = qtrue;
 			} else {
 				stylebits = WINDOW_STYLE_NORMAL;
 			}

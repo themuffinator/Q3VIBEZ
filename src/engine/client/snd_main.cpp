@@ -32,6 +32,7 @@ cvar_t *s_doppler;
 cvar_t *s_muteWhenMinimized;
 cvar_t *s_muteWhenUnfocused;
 
+static cvar_t *s_backend;
 static soundInterface_t si;
 
 /*
@@ -406,6 +407,10 @@ S_Init
 void S_Init( void )
 {
 	cvar_t		*cv;
+	cvar_t		*backendAvailable;
+	cvar_t		*backendHrtfAvailable;
+	cvar_t		*backendEfxAvailable;
+	cvar_t		*backendEaxAvailable;
 	qboolean	started = qfalse;
 
 	Com_Printf( "------ Initializing Sound ------\n" );
@@ -425,6 +430,25 @@ void S_Init( void )
 	s_muteWhenMinimized = Cvar_Get( "s_muteWhenMinimized", "1", CVAR_ARCHIVE );
 	Cvar_CheckRange( s_muteWhenMinimized, "0", "1", CV_INTEGER );
 	Cvar_SetDescription( s_muteWhenMinimized, "Mutes all audio while game is minimized." );
+#ifdef USE_OPENAL
+	backendAvailable = Cvar_Get( "s_openalAvailable", "1", CVAR_ROM );
+	s_backend = Cvar_Get( "s_backend", "openal", CVAR_ARCHIVE );
+#else
+	backendAvailable = Cvar_Get( "s_openalAvailable", "0", CVAR_ROM );
+	s_backend = Cvar_Get( "s_backend", "native", CVAR_ARCHIVE );
+#endif
+	backendHrtfAvailable = Cvar_Get( "s_openalHrtfAvailable", "0", CVAR_ROM );
+	backendEfxAvailable = Cvar_Get( "s_openalEfxAvailable", "0", CVAR_ROM );
+	backendEaxAvailable = Cvar_Get( "s_openalEaxAvailable", "0", CVAR_ROM );
+	Cvar_SetDescription( backendAvailable, "Whether this build includes the OpenAL spatial audio backend." );
+	Cvar_SetDescription( backendHrtfAvailable, "Whether the active OpenAL device supports HRTF virtualization." );
+	Cvar_SetDescription( backendEfxAvailable, "Whether the active OpenAL device supports EFX effects." );
+	Cvar_SetDescription( backendEaxAvailable, "Whether the active OpenAL device supports EAX reverb properties." );
+	Cvar_SetDescription( s_backend, "Selects the active sound backend. Use 'native' for the legacy mixer or 'openal' for spatial audio." );
+	if ( Q_stricmp( s_backend->string, "native" ) && Q_stricmp( s_backend->string, "openal" ) ) {
+		Com_Printf( S_COLOR_YELLOW "WARNING: unsupported sound backend '%s', falling back to 'native'\n", s_backend->string );
+		Cvar_Set( "s_backend", "native" );
+	}
 
 	cv = Cvar_Get( "s_initsound", "1", 0 );
 	Cvar_SetDescription( cv, "Whether or not to startup the sound system." );
@@ -441,6 +465,14 @@ void S_Init( void )
 		Cmd_AddCommand( "s_stop", S_StopAllSounds );
 		Cmd_AddCommand( "s_info", S_SoundInfo );
 
+#ifdef USE_OPENAL
+		if ( !started && !Q_stricmp( s_backend->string, "openal" ) ) {
+			started = S_AL_Init( &si );
+			if ( !started ) {
+				Com_Printf( S_COLOR_YELLOW "WARNING: OpenAL initialization failed, falling back to the native mixer.\n" );
+			}
+		}
+#endif
 		if ( !started ) {
 			started = S_Base_Init( &si );
 		}

@@ -110,6 +110,7 @@ void SP_target_remove_powerups( gentity_t *ent );
 void SP_target_give (gentity_t *ent);
 void SP_target_delay (gentity_t *ent);
 void SP_target_speaker (gentity_t *ent);
+void SP_q3vibe_env_sound( gentity_t *ent );
 void SP_target_print (gentity_t *ent);
 void SP_target_laser (gentity_t *self);
 void SP_target_character (gentity_t *ent);
@@ -212,6 +213,7 @@ const std::array spawns{
 	spawn_t{ "target_remove_powerups", SP_target_remove_powerups },
 	spawn_t{ "target_delay", SP_target_delay },
 	spawn_t{ "target_speaker", SP_target_speaker },
+	spawn_t{ "q3vibe_env_sound", SP_q3vibe_env_sound },
 	spawn_t{ "target_print", SP_target_print },
 	spawn_t{ "target_laser", SP_target_laser },
 	spawn_t{ "target_score", SP_target_score },

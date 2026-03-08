@@ -68,6 +68,16 @@ static cvar_t *cl_consoleKeys;
 static int in_eventTime = 0;
 static qboolean mouse_focus;
 
+typedef struct
+{
+	qboolean pending;
+	int width;
+	int height;
+	int eventTime;
+} sdlWindowResizeState_t;
+
+static sdlWindowResizeState_t s_windowResize;
+
 #define CTRL(a) ((a)-'a'+1)
 
 typedef struct q3SDL_Keysym_s
@@ -435,6 +445,84 @@ static void IN_GobbleMouseEvents( void )
 
 
 //#define DEBUG_EVENTS
+
+static qboolean IN_GetWindowSizeInPixels( int *width, int *height )
+{
+	if ( !SDL_window )
+		return qfalse;
+
+	if ( !SDL_GetWindowSizeInPixels( SDL_window, width, height ) )
+	{
+		Com_DPrintf( "SDL_GetWindowSizeInPixels failed: %s\n", SDL_GetError() );
+		return qfalse;
+	}
+
+	return qtrue;
+}
+
+static void IN_QueueWindowResize( void )
+{
+	int width, height;
+
+	if ( glw_state.isFullscreen || !glw_state.config )
+	{
+		s_windowResize.pending = qfalse;
+		return;
+	}
+
+	if ( !IN_GetWindowSizeInPixels( &width, &height ) )
+		return;
+
+	if ( width <= 0 || height <= 0 )
+		return;
+
+	glw_state.window_width = width;
+	glw_state.window_height = height;
+
+	if ( width == glw_state.config->vidWidth && height == glw_state.config->vidHeight )
+	{
+		s_windowResize.pending = qfalse;
+		return;
+	}
+
+	s_windowResize.pending = qtrue;
+	s_windowResize.width = width;
+	s_windowResize.height = height;
+	s_windowResize.eventTime = Sys_Milliseconds();
+}
+
+static void IN_CheckWindowResize( void )
+{
+	const SDL_MouseButtonFlags mouseButtons = SDL_GetGlobalMouseState( NULL, NULL );
+
+	if ( !s_windowResize.pending )
+		return;
+
+	if ( !SDL_window || !glw_state.config || glw_state.isFullscreen )
+	{
+		s_windowResize.pending = qfalse;
+		return;
+	}
+
+	if ( s_windowResize.width == glw_state.config->vidWidth && s_windowResize.height == glw_state.config->vidHeight )
+	{
+		s_windowResize.pending = qfalse;
+		return;
+	}
+
+	if ( mouseButtons & SDL_BUTTON_LMASK )
+		return;
+
+	if ( Sys_Milliseconds() - s_windowResize.eventTime < 125 )
+		return;
+
+	Cvar_SetIntegerValue( "r_mode", -1 );
+	Cvar_SetIntegerValue( "r_customWidth", s_windowResize.width );
+	Cvar_SetIntegerValue( "r_customHeight", s_windowResize.height );
+	Cbuf_AddText( "vid_restart\n" );
+
+	s_windowResize.pending = qfalse;
+}
 
 /*
 ===============
@@ -1138,9 +1226,11 @@ static const char *eventName( Uint32 event )
 		case SDL_EVENT_WINDOW_EXPOSED: return "EXPOSED";
 		case SDL_EVENT_WINDOW_MOVED: return "MOVED";
 		case SDL_EVENT_WINDOW_RESIZED: return "RESIZED";
+		case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED: return "PIXEL_SIZE_CHANGED";
 		case SDL_EVENT_WINDOW_MINIMIZED: return "MINIMIZED";
 		case SDL_EVENT_WINDOW_MAXIMIZED: return "MAXIMIZED";
 		case SDL_EVENT_WINDOW_RESTORED: return "RESTORED";
+		case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED: return "DISPLAY_SCALE_CHANGED";
 		case SDL_EVENT_WINDOW_MOUSE_ENTER: return "MOUSE_ENTER";
 		case SDL_EVENT_WINDOW_MOUSE_LEAVE: return "MOUSE_LEAVE";
 		case SDL_EVENT_WINDOW_FOCUS_GAINED: return "FOCUS_GAINED";
@@ -1351,6 +1441,9 @@ void HandleEvents( void )
 				break;
 
 			case SDL_EVENT_WINDOW_MOVED:
+			case SDL_EVENT_WINDOW_RESIZED:
+			case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+			case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
 			case SDL_EVENT_WINDOW_HIDDEN:
 			case SDL_EVENT_WINDOW_MINIMIZED:
 			case SDL_EVENT_WINDOW_SHOWN:
@@ -1370,6 +1463,12 @@ void HandleEvents( void )
 							Cvar_SetIntegerValue( "vid_xpos", e.window.data1 );
 							Cvar_SetIntegerValue( "vid_ypos", e.window.data2 );
 						}
+						break;
+					case SDL_EVENT_WINDOW_RESIZED:
+					case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+					case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
+						IN_QueueWindowResize();
+						gw_minimized = qfalse;
 						break;
 					// window states:
 					case SDL_EVENT_WINDOW_HIDDEN:
@@ -1393,6 +1492,8 @@ void HandleEvents( void )
 				break;
 		}
 	}
+
+	IN_CheckWindowResize();
 }
 
 

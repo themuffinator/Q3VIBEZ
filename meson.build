@@ -52,6 +52,7 @@ build_game_modules = get_option('build_game_modules')
 build_baseq3a = build_game_modules and get_option('build_baseq3a')
 use_curl = get_option('use_curl')
 use_ogg_vorbis = get_option('use_ogg_vorbis')
+use_openal = get_option('use_openal')
 use_sdl_opt = get_option('use_sdl')
 
 if not (build_opengl or build_vulkan or build_opengl2)
@@ -278,11 +279,18 @@ jpeg_dep = dependency('libjpeg', fallback : ['libjpeg', 'libjpeg_dep'], required
 
 client_external_deps = [jpeg_dep]
 ogg_vorbis_defines = []
+openal_defines = []
 
 if use_ogg_vorbis
   vorbisfile_dep = dependency('vorbisfile', fallback : ['vorbis', 'vorbisfile_dep'], required : true)
   client_external_deps += [vorbisfile_dep]
   ogg_vorbis_defines += ['-DUSE_OGG_VORBIS']
+endif
+
+if use_openal
+  openal_dep = dependency('openal', fallback : ['openal-soft', 'openal_dep'], required : true)
+  client_external_deps += [openal_dep]
+  openal_defines += ['-DUSE_OPENAL']
 endif
 
 curl_defines = []
@@ -322,7 +330,7 @@ client_defines = [
   '-DUSE_RENDERER_DLOPEN',
   renderer_prefix_define,
   '-DRENDERER_DEFAULT=@0@'.format(default_renderer),
-] + curl_defines + ogg_vorbis_defines
+] + curl_defines + ogg_vorbis_defines + openal_defines
 
 client_all_sources = client_sources
 if use_curl
@@ -509,6 +517,7 @@ summary(
     'SDL backend' : platform_use_sdl,
     'libcurl' : use_curl,
     'OGG/Vorbis' : use_ogg_vorbis,
+    'OpenAL backend' : use_openal,
     'Game modules' : build_game_modules,
     'baseq3a game modules' : build_baseq3a,
     'OpenGL renderer' : build_opengl,

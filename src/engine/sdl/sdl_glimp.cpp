@@ -62,12 +62,52 @@ static PFN_vkGetInstanceProcAddr qvkGetInstanceProcAddr;
 cvar_t *r_stereoEnabled;
 cvar_t *in_nograb;
 
+typedef struct
+{
+	byte *data;
+	size_t size;
+} sdlClipboardBitmap_t;
+
+static const char *s_clipboardBitmapMimeTypes[] = {
+	"image/bmp"
+};
+
+static const void *GLW_ClipboardBitmapData( void *userdata, const char *mime_type, size_t *size )
+{
+	sdlClipboardBitmap_t *clipboardData = (sdlClipboardBitmap_t *)userdata;
+
+	if ( !clipboardData || SDL_strcmp( mime_type, "image/bmp" ) != 0 ) {
+		*size = 0;
+		return NULL;
+	}
+
+	*size = clipboardData->size;
+	return clipboardData->data;
+}
+
+static void GLW_ClipboardBitmapCleanup( void *userdata )
+{
+	sdlClipboardBitmap_t *clipboardData = (sdlClipboardBitmap_t *)userdata;
+
+	if ( !clipboardData )
+		return;
+
+	SDL_free( clipboardData->data );
+	SDL_free( clipboardData );
+}
+
 static void GLW_SetCursorVisible( qboolean visible )
 {
 	if ( visible )
 		SDL_ShowCursor();
 	else
 		SDL_HideCursor();
+}
+
+static qboolean GLW_UseBorderlessWindow( qboolean fullscreen )
+{
+	return !fullscreen
+		&& ( ( r_borderless && r_borderless->integer ) || ( r_noborder && r_noborder->integer ) );
 }
 
 static SDL_Window *GLW_CreateWindow( const char *title, int x, int y, int w, int h, SDL_WindowFlags flags )
@@ -229,7 +269,48 @@ static SDL_DisplayID FindNearestDisplay( int *x, int *y, int w, int h )
 
 static SDL_HitTestResult SDL_HitTestFunc( SDL_Window *win, const SDL_Point *area, void *data )
 {
-	if ( Key_GetCatcher() & KEYCATCH_CONSOLE && keys[ K_ALT ].down )
+	int width, height;
+	int borderSize, cornerSize;
+	float displayScale;
+
+	if ( !GLW_UseBorderlessWindow( qfalse ) )
+		return SDL_HITTEST_NORMAL;
+
+	if ( !SDL_GetWindowSize( win, &width, &height ) )
+		return keys[ K_ALT ].down ? SDL_HITTEST_DRAGGABLE : SDL_HITTEST_NORMAL;
+
+	displayScale = SDL_GetWindowDisplayScale( win );
+	if ( displayScale <= 0.0f )
+		displayScale = 1.0f;
+
+	borderSize = MAX( 8, (int)( 8.0f * displayScale ) );
+	cornerSize = borderSize * 2;
+
+	if ( area->x < borderSize )
+	{
+		if ( area->y < cornerSize )
+			return SDL_HITTEST_RESIZE_TOPLEFT;
+		if ( area->y >= ( height - cornerSize ) )
+			return SDL_HITTEST_RESIZE_BOTTOMLEFT;
+		return SDL_HITTEST_RESIZE_LEFT;
+	}
+
+	if ( area->x >= ( width - borderSize ) )
+	{
+		if ( area->y < cornerSize )
+			return SDL_HITTEST_RESIZE_TOPRIGHT;
+		if ( area->y >= ( height - cornerSize ) )
+			return SDL_HITTEST_RESIZE_BOTTOMRIGHT;
+		return SDL_HITTEST_RESIZE_RIGHT;
+	}
+
+	if ( area->y < borderSize )
+		return SDL_HITTEST_RESIZE_TOP;
+
+	if ( area->y >= ( height - borderSize ) )
+		return SDL_HITTEST_RESIZE_BOTTOM;
+
+	if ( keys[ K_ALT ].down )
 		return SDL_HITTEST_DRAGGABLE;
 
 	return SDL_HITTEST_NORMAL;
@@ -328,10 +409,11 @@ static rserr_t GLW_SetMode( int mode, const char *modeFS, qboolean fullscreen, q
 	gw_active = qfalse;
 	gw_minimized = qtrue;
 
-	if ( !fullscreen && r_noborder->integer )
-	{
+	if ( GLW_UseBorderlessWindow( fullscreen ) )
 		flags |= SDL_WINDOW_BORDERLESS;
-	}
+
+	if ( !fullscreen )
+		flags |= SDL_WINDOW_RESIZABLE;
 
 	//flags |= SDL_WINDOW_ALLOW_HIGHDPI;
 
@@ -594,7 +676,7 @@ static rserr_t GLW_SetMode( int mode, const char *modeFS, qboolean fullscreen, q
 		return RSERR_INVALID_MODE;
 	}
 
-	if ( !fullscreen && r_noborder->integer )
+	if ( GLW_UseBorderlessWindow( fullscreen ) )
 		SDL_SetWindowHitTest( SDL_window, SDL_HitTestFunc, NULL );
 
 	if ( !SDL_GetWindowSizeInPixels( SDL_window, &config->vidWidth, &config->vidHeight ) )
@@ -931,23 +1013,31 @@ Sys_SetClipboardBitmap
 */
 void Sys_SetClipboardBitmap( const byte *bitmap, int length )
 {
-#ifdef _WIN32
-	HGLOBAL hMem;
-	byte *ptr;
+	sdlClipboardBitmap_t *clipboard;
 
-	if ( !OpenClipboard( NULL ) )
+	if ( !bitmap || length <= 0 )
 		return;
 
-	EmptyClipboard();
-	hMem = GlobalAlloc( GMEM_MOVEABLE | GMEM_DDESHARE, length );
-	if ( hMem != NULL ) {
-		ptr = ( byte* )GlobalLock( hMem );
-		if ( ptr != NULL ) {
-			memcpy( ptr, bitmap, length ); 
-		}
-		GlobalUnlock( hMem );
-		SetClipboardData( CF_DIB, hMem );
+	clipboard = (sdlClipboardBitmap_t *)SDL_calloc( 1, sizeof( *clipboard ) );
+	if ( !clipboard ) {
+		Com_DPrintf( "Sys_SetClipboardBitmap: SDL_calloc failed: %s\n", SDL_GetError() );
+		return;
 	}
-	CloseClipboard();
-#endif
+
+	clipboard->data = (byte *)SDL_malloc( length );
+	if ( !clipboard->data ) {
+		Com_DPrintf( "Sys_SetClipboardBitmap: SDL_malloc failed: %s\n", SDL_GetError() );
+		SDL_free( clipboard );
+		return;
+	}
+
+	memcpy( clipboard->data, bitmap, length );
+	clipboard->size = (size_t)length;
+
+	if ( !SDL_SetClipboardData( GLW_ClipboardBitmapData, GLW_ClipboardBitmapCleanup, clipboard,
+		s_clipboardBitmapMimeTypes, ARRAY_LEN( s_clipboardBitmapMimeTypes ) ) )
+	{
+		Com_DPrintf( "Sys_SetClipboardBitmap: SDL_SetClipboardData failed: %s\n", SDL_GetError() );
+		GLW_ClipboardBitmapCleanup( clipboard );
+	}
 }

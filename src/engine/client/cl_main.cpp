@@ -75,6 +75,7 @@ cvar_t	*cl_reconnectArgs;
 // common cvars for GLimp modules
 cvar_t	*vid_xpos;			// X coordinate of window position
 cvar_t	*vid_ypos;			// Y coordinate of window position
+cvar_t	*r_borderless;
 cvar_t	*r_noborder;
 
 cvar_t *r_allowSoftwareGL;	// don't abort out if the pixelformat claims software
@@ -3794,7 +3795,15 @@ static void CL_InitGLimp_Cvars( void )
 
 	r_noborder = Cvar_Get( "r_noborder", "0", CVAR_ARCHIVE_ND | CVAR_LATCH );
 	Cvar_CheckRange( r_noborder, "0", "1", CV_INTEGER );
-	Cvar_SetDescription( r_noborder, "Setting to 1 will remove window borders and title bar in windowed mode, hold ALT to drag & drop it with opened console." );
+	r_borderless = Cvar_Get( "r_borderless", r_noborder->string, CVAR_ARCHIVE | CVAR_LATCH );
+	Cvar_CheckRange( r_borderless, "0", "1", CV_INTEGER );
+	Cvar_SetDescription( r_borderless, "Borderless windowed mode. Hold ALT to move the window and drag edges or corners to resize it." );
+	Cvar_SetDescription( r_noborder, "Legacy alias for \\r_borderless." );
+
+	if ( r_noborder->integer != r_borderless->integer ) {
+		Cvar_Set( "r_noborder", r_borderless->string );
+		r_noborder->modified = qfalse;
+	}
 
 	r_mode = Cvar_Get( "r_mode", "-2", CVAR_ARCHIVE | CVAR_LATCH );
 	Cvar_CheckRange( r_mode, "-2", va( "%i", s_numVidModes-1 ), CV_INTEGER );

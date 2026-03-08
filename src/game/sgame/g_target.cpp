@@ -283,6 +283,19 @@ void SP_target_speaker( gentity_t *ent ) {
 	trap_LinkEntity( ent );
 }
 
+/*QUAKED q3vibe_env_sound (0 .7 .9) (-8 -8 -8) (8 8 8)
+"radius"			Radius in units used for automatic preset selection. Default is 250.
+"reverb_preset"	Named reverb preset or numeric preset id.
+"reverb_effect_id"	Numeric reverb preset id alias.
+
+Editor-only helper entity for OpenAL environmental reverb zones. The server
+does not simulate it; the client reads it from the BSP entity string when
+automatic OpenAL reverb selection is enabled.
+*/
+void SP_q3vibe_env_sound( gentity_t *ent ) {
+	G_FreeEntity( ent );
+}
+
 
 
 //==========================================================

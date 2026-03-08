@@ -53,6 +53,7 @@ client_sources = files(
   '../../../src/engine/client/snd_main.cpp',
   '../../../src/engine/client/snd_mem.cpp',
   '../../../src/engine/client/snd_mix.cpp',
+  '../../../src/engine/client/snd_openal.cpp',
   '../../../src/engine/client/snd_wavelet.cpp',
 )
 

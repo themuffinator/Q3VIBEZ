@@ -570,7 +570,7 @@ static void CL_KeyDownEvent( int key, unsigned time )
 	}
 
 	// hardcoded screenshot key
-	if ( key == K_PRINT ) {
+	if ( key == K_PRINT || key == K_SYSREQ ) {
 		if ( keys[K_SHIFT].down ) {
 			Cbuf_ExecuteText( EXEC_APPEND, "screenshotBMP\n" );
 		} else {
@@ -686,7 +686,7 @@ static void CL_KeyUpEvent( int key, unsigned time )
 	}
 
 	// hardcoded screenshot key
-	if ( key == K_PRINT ) {
+	if ( key == K_PRINT || key == K_SYSREQ ) {
 		return;
 	}
 

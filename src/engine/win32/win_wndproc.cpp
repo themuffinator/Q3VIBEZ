@@ -34,6 +34,33 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 cvar_t		*in_forceCharset;
 
 static HHOOK WinHook;
+static qboolean s_inSizeMove;
+
+static void WIN_QueueResizeRestart( HWND hWnd )
+{
+	RECT rect;
+	int width, height;
+
+	if ( glw_state.cdsFullscreen || !hWnd )
+		return;
+
+	if ( !GetClientRect( hWnd, &rect ) )
+		return;
+
+	width = rect.right - rect.left;
+	height = rect.bottom - rect.top;
+
+	if ( width <= 0 || height <= 0 )
+		return;
+
+	if ( glw_state.config && width == glw_state.config->vidWidth && height == glw_state.config->vidHeight )
+		return;
+
+	Cvar_SetIntegerValue( "r_mode", -1 );
+	Cvar_SetIntegerValue( "r_customWidth", width );
+	Cvar_SetIntegerValue( "r_customHeight", height );
+	Cbuf_AddText( "vid_restart\n" );
+}
 
 /*
 ==================
@@ -794,6 +821,22 @@ LRESULT WINAPI MainWndProc( HWND hWnd, UINT uMsg, WPARAM  wParam, LPARAM lParam 
 			g_wv.winRectValid = qtrue;
 			UpdateMonitorInfo( &g_wv.winRect );
 			IN_UpdateWindow( NULL, qtrue );
+
+			if ( !s_inSizeMove && !glw_state.cdsFullscreen
+				&& ( wParam == SIZE_RESTORED || wParam == SIZE_MAXIMIZED ) ) {
+				WIN_QueueResizeRestart( hWnd );
+			}
+		}
+		break;
+
+	case WM_ENTERSIZEMOVE:
+		s_inSizeMove = qtrue;
+		break;
+
+	case WM_EXITSIZEMOVE:
+		s_inSizeMove = qfalse;
+		if ( gw_active && focused && !gw_minimized ) {
+			WIN_QueueResizeRestart( hWnd );
 		}
 		break;
 
@@ -958,9 +1001,45 @@ LRESULT WINAPI MainWndProc( HWND hWnd, UINT uMsg, WPARAM  wParam, LPARAM lParam 
 		return 0;
 
 	case WM_NCHITTEST:
-		// in borderless mode - drag using client area when holding ALT
-		if ( g_wv.borderless && GetKeyState( VK_MENU ) & (1<<15) )
-			return HTCAPTION;
+		if ( g_wv.borderless )
+		{
+			RECT rect;
+			POINT pt = { (short)LOWORD( lParam ), (short)HIWORD( lParam ) };
+			const LONG borderX = MAX( 8, GetSystemMetrics( SM_CXSIZEFRAME ) );
+			const LONG borderY = MAX( 8, GetSystemMetrics( SM_CYSIZEFRAME ) );
+			const LONG cornerY = borderY * 2;
+
+			if ( GetWindowRect( hWnd, &rect ) )
+			{
+				if ( pt.x < rect.left + borderX )
+				{
+					if ( pt.y < rect.top + cornerY )
+						return HTTOPLEFT;
+					if ( pt.y >= rect.bottom - cornerY )
+						return HTBOTTOMLEFT;
+					return HTLEFT;
+				}
+
+				if ( pt.x >= rect.right - borderX )
+				{
+					if ( pt.y < rect.top + cornerY )
+						return HTTOPRIGHT;
+					if ( pt.y >= rect.bottom - cornerY )
+						return HTBOTTOMRIGHT;
+					return HTRIGHT;
+				}
+
+				if ( pt.y < rect.top + borderY )
+					return HTTOP;
+
+				if ( pt.y >= rect.bottom - borderY )
+					return HTBOTTOM;
+			}
+
+			// in borderless mode - drag using client area when holding ALT
+			if ( GetKeyState( VK_MENU ) & (1<<15) )
+				return HTCAPTION;
+		}
 		break;
 
 	case WM_ERASEBKGND: 

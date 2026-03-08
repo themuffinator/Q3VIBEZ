@@ -417,6 +417,7 @@ extern	cvar_t	*com_maxfps;
 
 extern	cvar_t	*vid_xpos;
 extern	cvar_t	*vid_ypos;
+extern	cvar_t	*r_borderless;
 extern	cvar_t	*r_noborder;
 
 extern	cvar_t	*r_allowSoftwareGL;
